@@ -1,0 +1,19 @@
+[project]
+name = "datasource-kit"
+version = "0.1.0"
+description = "Generic, dependency-free toolkit for managing many datasources (batch reference-data updaters and long-running scraper workers)."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+scheduler = ["apscheduler>=3.10"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/datasource_kit"]
