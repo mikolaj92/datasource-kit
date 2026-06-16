@@ -27,8 +27,16 @@ The kit imposes neither model on the other. A batch source implements
 - `manifest.Manifest` / `manifest.SourceContract` — declarative source
   descriptors (data, not code).
 
-No third-party runtime dependencies. Python ≥ 3.12. (An optional `scheduler`
-extra is reserved for an APScheduler-backed helper.)
+- `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
+  an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
+
+The core package has **no third-party runtime dependencies** (Python ≥ 3.12).
+Only `WorkerScheduler` needs the extra, and it is imported lazily so plain
+`import datasource_kit` never pulls in APScheduler:
+
+```bash
+pip install "datasource-kit[scheduler]"
+```
 
 ## Install (path dependency)
 
