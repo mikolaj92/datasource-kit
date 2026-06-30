@@ -27,6 +27,14 @@ The kit imposes neither model on the other. A batch source implements
 - `manifest.Manifest` / `manifest.SourceContract` — declarative source
   descriptors (data, not code).
 
+- `runtime.run_ingest` / `runtime.ProviderRegistry` / `runtime.builtin_registry` —
+  the **Named Core Archetype**: opt-in `enumerate→fetch→persist→diff→assess→report`
+  pipeline with provider-registry wiring, `TokenBucket` throttle, `with_retry`
+  backoff, and in-memory defaults for zero-setup use.
+- `report.IngestReport` / `report.CompletenessReport` — serializable, replayable
+  output object with diff counts, retry/throttle telemetry, `source_digest`,
+  `kit_version`, and `save_json`.
+
 - `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
   an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
 
@@ -100,12 +108,93 @@ Manifest(
 )
 ```
 
+### Named Core Archetype — `run_ingest`
+
+`run_ingest` is the opt-in composition over registered providers.  It is the
+structural twin of `splot.run_round` and `reviewkit.review_document`: a single
+named entry point that chains the primitives for you, never the only way to use
+them.
+
+```python
+from datasource_kit import run_ingest, IngestReport
+
+# Standalone demo — zero consumer code, zero network, zero third-party deps:
+report: IngestReport = run_ingest("my-source")
+print(report.status)        # "ok"
+print(report.diff)          # {"added": ..., "updated": ..., ...}
+print(report.retries_used)  # int
+report.save_json("report.json")
+```
+
+#### Two diff strategies out of the box
+
+| Provider name | Behaviour |
+|---|---|
+| `diff.by_id` (default) | Set-difference vs `store.existing_ids()` — upserts new/changed records |
+| `diff.full_replace` | Replaces the entire store via `store.replace_all()` — never reads `existing_ids()` |
+
+#### Custom assess provider
+
+```python
+from datasource_kit import SourceProfile, builtin_registry, run_ingest
+
+reg = builtin_registry()
+
+def my_assess(counts, evidence):
+    return "complete" if counts["added"] > 0 else "empty"
+
+reg.register("assess.mine", my_assess)
+
+profile = SourceProfile(
+    name="my-source",
+    providers={
+        "enumerate": "enumerate.passthrough",
+        "records":   "records.passthrough",
+        "diff":      "diff.by_id",
+        "assess":    "assess.mine",
+    },
+    policies={"rate_per_sec": 5.0, "burst": 10.0, "retries": 3, "backoff": 1.0},
+)
+report = run_ingest(profile, registry=reg, windows=[{"id": 1}, {"id": 2}])
+print(report.status)   # "complete"
+```
+
+The runtime emits **no grading verdict**. Whether counts mean "complete",
+"partial", or "empty" is entirely the consumer's `assess` provider's call.
+
+### `IngestReport`
+
+```python
+@dataclass
+class IngestReport:
+    source: str
+    status: str                          # consumer's assess provider output
+    windows: list[dict]                  # per-window telemetry
+    completeness: CompletenessReport | None
+    diff: dict[str, int]                 # added/updated/removed/unchanged
+    retries_used: int
+    rate_limit_waits: float              # total seconds on TokenBucket
+    source_digest: str                   # SHA-256 of the resolved profile
+    kit_version: str                     # from package metadata
+    warnings: list[str]
+
+    def save_json(self, path) -> None: ...
+    def as_dict(self) -> dict: ...
+```
+
+`source_digest` + `kit_version` give deterministic replay and audit.  `save_json`
+uses stdlib `json` only.
+
 ## Design notes
 
 - **Stdlib only** so both a lightweight batch repo and a heavy scraper repo can
   adopt it without dependency friction.
 - **Structural protocols, not base classes** — existing datasource classes
   already satisfy `DataSource` / `IngestActor` without inheritance or imports.
+- **Two faces, one kit** — the primitives library face (`DataSource`/`IngestActor`
+  + bare primitives) and the opt-in runtime face (`run_ingest`) coexist. Batch
+  MSDS sources keep using the bare `DataSource` protocol; scraper-style sources
+  can opt in to `run_ingest` for the full archetype loop.
 - The heavyweight scraper apparatus (job queue, coverage windows, runtime
   supervisor) intentionally lives in the *consuming* project, not here. The kit
   provides the shared vocabulary and primitives, not an orchestrator.
