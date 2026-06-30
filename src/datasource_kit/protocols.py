@@ -1,8 +1,9 @@
-"""Structural protocols for the two datasource models the kit supports.
+"""Structural protocols for the datasource models the kit supports.
 
 ``DataSource`` describes the *batch reference-data* model (download an official
 dataset, reload a local store, answer lookups). ``IngestActor`` describes the
 *scraper/crawler* model (handle a job emitted by a queue, yield domain objects).
+``ArtifactStore`` describes the tiny blob seam scraper runtimes can share.
 
 Both are ``runtime_checkable`` Protocols, so existing classes satisfy them
 structurally without importing anything from this package.
@@ -12,7 +13,20 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Protocol, runtime_checkable
 
-__all__ = ["DataSource", "IngestActor"]
+__all__ = ["ArtifactStore", "DataSource", "IngestActor"]
+
+
+@runtime_checkable
+class ArtifactStore(Protocol):
+    """Opaque bytes artifact store: persist payloads and resolve refs."""
+
+    def store(self, payload: bytes) -> str:
+        """Persist ``payload`` and return an opaque reference string."""
+        ...
+
+    def resolve(self, ref: str) -> bytes:
+        """Resolve an opaque reference string back to payload bytes."""
+        ...
 
 
 @runtime_checkable

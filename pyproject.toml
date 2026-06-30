@@ -9,6 +9,8 @@ readme = "README.md"
 dependencies = []
 
 [project.optional-dependencies]
+# Blob/artifact resolution only; datasource-kit still owns no job queue.
+fala = ["fala"]
 scheduler = ["apscheduler>=3.10"]
 
 [dependency-groups]
