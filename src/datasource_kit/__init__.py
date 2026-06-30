@@ -24,7 +24,19 @@ from typing import TYPE_CHECKING
 
 from .journal import ensure_update_log, now_utc, record_update
 from .manifest import Manifest, SourceContract
-from .protocols import ArtifactStore, DataSource, IngestActor
+from .protocols import (
+    ArtifactStore,
+    DataSource,
+    Enumerator,
+    Fetcher,
+    InMemoryArtifactStore,
+    InMemoryStore,
+    IngestActor,
+    MockEnumerator,
+    MockFetcher,
+    StoragePort,
+    SupportsExistingIds,
+)
 from .rate_limit import TokenBucket
 from .registry import Registry
 from .retry import retry
@@ -35,10 +47,18 @@ if TYPE_CHECKING:
 __all__ = [
     "ArtifactStore",
     "DataSource",
+    "Enumerator",
+    "Fetcher",
+    "InMemoryArtifactStore",
+    "InMemoryStore",
     "IngestActor",
     "Manifest",
+    "MockEnumerator",
+    "MockFetcher",
     "Registry",
     "SourceContract",
+    "StoragePort",
+    "SupportsExistingIds",
     "TokenBucket",
     "WorkerScheduler",
     "ensure_update_log",
