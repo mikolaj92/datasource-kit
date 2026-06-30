@@ -8,6 +8,9 @@ license-files = ["LICENSE"]
 readme = "README.md"
 dependencies = []
 
+[project.scripts]
+datasource-kit = "datasource_kit.cli:main"
+
 [project.optional-dependencies]
 scheduler = ["apscheduler>=3.10"]
 

@@ -1,0 +1,15 @@
+{
+  "name": "demo-batch",
+  "source_type": "batch",
+  "providers": {
+    "enumerator": "window.by_day",
+    "fetcher": "fetch.mock",
+    "mapper": "records.passthrough",
+    "diff": "diff.full_replace",
+    "assess": "assess.passthrough",
+    "store": "store.in_memory"
+  },
+  "policies": {"coverage_unit": "snapshot"},
+  "status_vocabulary": ["ok", "empty"],
+  "completeness_layers": []
+}
