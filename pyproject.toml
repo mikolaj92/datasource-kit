@@ -10,6 +10,7 @@ dependencies = []
 
 [project.optional-dependencies]
 scheduler = ["apscheduler>=3.10"]
+profiles = ["pyyaml>=6.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

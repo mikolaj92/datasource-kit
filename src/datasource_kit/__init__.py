@@ -20,9 +20,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .errors import ProfileError
 from .journal import ensure_update_log, now_utc, record_update
 from .manifest import Manifest, SourceContract
+from .profile import SourceProfile, load_profile, validate_source
 from .protocols import DataSource, IngestActor
+from .providers import ProviderRegistry, builtin_registry
 from .rate_limit import TokenBucket
 from .registry import Registry
 from .retry import retry
@@ -34,14 +37,20 @@ __all__ = [
     "DataSource",
     "IngestActor",
     "Manifest",
+    "ProfileError",
+    "ProviderRegistry",
     "Registry",
     "SourceContract",
+    "SourceProfile",
     "TokenBucket",
     "WorkerScheduler",
+    "builtin_registry",
     "ensure_update_log",
+    "load_profile",
     "now_utc",
     "record_update",
     "retry",
+    "validate_source",
 ]
 
 

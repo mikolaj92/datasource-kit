@@ -27,15 +27,32 @@ The kit imposes neither model on the other. A batch source implements
 - `manifest.Manifest` / `manifest.SourceContract` — declarative source
   descriptors (data, not code).
 
+- `errors.ProfileError` — typed error raised by the profile loader/validator.
+- `providers.ProviderRegistry` / `providers.builtin_registry()` — name-keyed
+  registry for provider callables; `builtin_registry()` ships the mock providers
+  used by the example profiles.
+- `profile.SourceProfile` — frozen dataclass carrying provider name strings,
+  policies-as-data, and consumer-injected vocabulary lists.
+- `profile.load_profile(folder)` — loads `<folder>/source.json` (stdlib default)
+  or `<folder>/source.yaml` (lazy pyyaml, `[profiles]` extra) into a
+  `SourceProfile`. Fails closed on missing file, malformed document, or empty
+  load-bearing field. Optional `coverage.md`/`identity.md` are read verbatim
+  into `.markdown`.
+- `profile.validate_source(profile, registry)` — checks that every named
+  provider in the profile is registered; raises `ProfileError` listing each
+  missing name. No worker-contract or vocabulary checks — registry allowlist only.
+
 - `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
   an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
 
 The core package has **no third-party runtime dependencies** (Python ≥ 3.12).
-Only `WorkerScheduler` needs the extra, and it is imported lazily so plain
-`import datasource_kit` never pulls in APScheduler:
+`WorkerScheduler` needs the `scheduler` extra and `load_profile` on YAML
+folders needs the `profiles` extra; both are imported lazily so plain
+`import datasource_kit` never pulls in third-party packages:
 
 ```bash
 pip install "datasource-kit[scheduler]"
+pip install "datasource-kit[profiles]"   # only needed for source.yaml folders
 ```
 
 ## Install (path dependency)
@@ -99,6 +116,43 @@ Manifest(
     ),
 )
 ```
+
+### Profile-folder loader
+
+A consumer hands `load_profile` a folder; the kit reads `source.json` (stdlib,
+dep-free default) or `source.yaml` (lazy pyyaml, `[profiles]` extra) and
+returns a frozen `SourceProfile`. `validate_source` checks every named provider
+against a registry — same membership test as splot's `validate_profile`.
+
+```python
+from datasource_kit import load_profile, validate_source, builtin_registry
+
+profile = load_profile("examples/sources/demo-scraper")
+validate_source(profile, builtin_registry())   # raises ProfileError if unknown
+print(profile.name)          # "demo-scraper"
+print(profile.providers)     # {"enumerator": "window.by_day", ...}
+print(profile.policies)      # {"rate_limit": ..., "retry": ..., "coverage_unit": "day"}
+```
+
+The `source.json` shape (see `examples/sources/demo-scraper/source.json`):
+
+```json
+{
+  "name": "demo-scraper",
+  "source_type": "scraper",
+  "providers": {
+    "enumerator": "window.by_day",
+    "fetcher": "fetch.mock",
+    "store": "store.in_memory"
+  },
+  "policies": {"coverage_unit": "day"},
+  "status_vocabulary": ["working", "blocked", "completed"],
+  "completeness_layers": ["records"]
+}
+```
+
+`status_vocabulary` and `completeness_layers` are **consumer-injected** — the
+kit ships no status enum and no default layer taxonomy.
 
 ## Design notes
 
