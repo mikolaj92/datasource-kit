@@ -24,18 +24,24 @@ The kit imposes neither model on the other. A batch source implements
 - `registry.Registry[T]` — name-keyed registry with duplicate protection.
 - `protocols.DataSource` / `protocols.IngestActor` — `runtime_checkable`
   structural protocols; existing classes satisfy them without importing the kit.
+- `protocols.ArtifactStore` — tiny bytes-in/ref-out artifact seam for runtimes
+  that need to persist scraper payloads outside the domain object stream.
 - `manifest.Manifest` / `manifest.SourceContract` — declarative source
   descriptors (data, not code).
 
 - `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
   an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
+- `adapters.fala.FalaArtifactStore` — *optional*, behind the `fala` extra:
+  a thin adapter over Fala's file artifact store for blob/artifact persistence
+  and synchronous resolution. It is **not** a queue.
 
 The core package has **no third-party runtime dependencies** (Python ≥ 3.12).
-Only `WorkerScheduler` needs the extra, and it is imported lazily so plain
-`import datasource_kit` never pulls in APScheduler:
+Optional integrations are imported lazily so plain `import datasource_kit` never
+pulls in APScheduler or Fala:
 
 ```bash
 pip install "datasource-kit[scheduler]"
+pip install "datasource-kit[fala]"
 ```
 
 ## Install (path dependency)
@@ -99,6 +105,19 @@ Manifest(
     ),
 )
 ```
+
+### Fala artifact backend
+
+```python
+from datasource_kit.adapters.fala import FalaArtifactStore
+
+artifacts = FalaArtifactStore("./artifacts")
+ref = artifacts.store(b"raw upstream payload")
+payload = artifacts.resolve(ref)
+```
+
+The Fala adapter only bridges blob/artifact storage. Job queues, dispatch loops,
+and worker supervision remain in the consuming project.
 
 ## Design notes
 
