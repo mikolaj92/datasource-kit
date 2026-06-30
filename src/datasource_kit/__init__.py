@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .errors import SourceError, TransportError
 from .journal import ensure_update_log, now_utc, record_update
 from .manifest import Manifest, SourceContract
 from .protocols import (
@@ -57,9 +58,11 @@ __all__ = [
     "MockFetcher",
     "Registry",
     "SourceContract",
+    "SourceError",
     "StoragePort",
     "SupportsExistingIds",
     "TokenBucket",
+    "TransportError",
     "WorkerScheduler",
     "ensure_update_log",
     "now_utc",
