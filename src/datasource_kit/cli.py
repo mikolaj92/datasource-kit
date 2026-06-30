@@ -51,13 +51,16 @@ def _cmd_coverage_report(args: argparse.Namespace) -> int:
     print(f"windows_processed: {report.windows_processed}")
     print(f"records_fetched:   {report.records_fetched}")
     print(f"diff:              {json.dumps(report.diff)}")
+    if c is None:
+        print("completeness:      none")
+        return 0
     print(f"present:           {c.present}")
     print(f"truth:             {c.truth}")
     ratio = c.ratio
     if ratio is not None:
         print(f"ratio:             {ratio:.2%}")
     for layer, count in c.layers.items():
-        print(f"  layer[{layer}]: {count}")
+        print(f"  layer[{layer}]: {count.present_count}/{count.truth_count}")
     return 0
 
 

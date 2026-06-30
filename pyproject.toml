@@ -2,6 +2,10 @@
 name = "datasource-kit"
 version = "0.1.0"
 description = "Generic, dependency-free toolkit for managing many datasources (batch reference-data updaters and long-running scraper workers)."
+# Floor rationale - do NOT relax to 3.11:
+# * deliberate policy floor matching current consumers;
+# * not a syntax requirement, but the kit stays free to use 3.12 idioms;
+# * core remains dependency-free and must not constrain heavier consumers.
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -14,6 +18,8 @@ datasource-kit = "datasource_kit.cli:main"
 [project.optional-dependencies]
 # Blob/artifact resolution only; datasource-kit still owns no job queue.
 fala = ["fala"]
+# YAML profile loading only; JSON profiles are the dep-free default.
+profiles = ["pyyaml>=6.0"]
 scheduler = ["apscheduler>=3.10"]
 
 [dependency-groups]

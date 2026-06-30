@@ -22,9 +22,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .errors import SourceError, TransportError
+from .completeness import CompletenessReport, LayerCoverage, layers_from_names
+from .errors import (
+    DatasourceKitError,
+    ProfileError,
+    ProviderError,
+    RegistryError,
+    RuntimeStepError,
+    SourceError,
+    TransportError,
+    ValidationError,
+)
 from .journal import ensure_update_log, now_utc, record_update
+from .ledger import DiscoveredItem, DiscoveryLedgerStore, Evidence, LedgerSummary
 from .manifest import Manifest, SourceContract
+from .profile import SourceProfile, load_profile, validate_source
 from .protocols import (
     ArtifactStore,
     DataSource,
@@ -38,36 +50,75 @@ from .protocols import (
     StoragePort,
     SupportsExistingIds,
 )
+from .providers import ProviderRegistry, builtin_registry
 from .rate_limit import TokenBucket
 from .registry import Registry
+from .report import IngestReport
+from .results import (
+    Cursor,
+    WorkerResult,
+    blocked_result,
+    completed_result,
+    working_result,
+)
 from .retry import retry
+from .runtime import run_ingest
+from .window import DayWindow, WindowIterator, split_range_into_days
 
 if TYPE_CHECKING:
     from .scheduler import WorkerScheduler
 
 __all__ = [
     "ArtifactStore",
+    "CompletenessReport",
+    "Cursor",
     "DataSource",
+    "DatasourceKitError",
+    "DayWindow",
+    "DiscoveredItem",
+    "DiscoveryLedgerStore",
     "Enumerator",
+    "Evidence",
     "Fetcher",
+    "IngestReport",
     "InMemoryArtifactStore",
     "InMemoryStore",
     "IngestActor",
+    "LayerCoverage",
+    "LedgerSummary",
     "Manifest",
     "MockEnumerator",
     "MockFetcher",
+    "ProfileError",
+    "ProviderError",
+    "ProviderRegistry",
     "Registry",
+    "RegistryError",
+    "RuntimeStepError",
     "SourceContract",
     "SourceError",
+    "SourceProfile",
     "StoragePort",
     "SupportsExistingIds",
     "TokenBucket",
     "TransportError",
+    "ValidationError",
     "WorkerScheduler",
+    "WindowIterator",
+    "WorkerResult",
+    "blocked_result",
+    "builtin_registry",
+    "completed_result",
     "ensure_update_log",
+    "layers_from_names",
+    "load_profile",
     "now_utc",
     "record_update",
     "retry",
+    "run_ingest",
+    "split_range_into_days",
+    "validate_source",
+    "working_result",
 ]
 
 
