@@ -7,6 +7,8 @@ It supports two models behind one small surface:
   :func:`~datasource_kit.retry.retry`;
 * long-running scraper workers -- :class:`~datasource_kit.protocols.IngestActor`
   plus :class:`~datasource_kit.rate_limit.TokenBucket`.
+* artifact backends -- :class:`~datasource_kit.protocols.ArtifactStore` for
+  bytes-in/ref-out payload persistence.
 
 Both kinds register into one :class:`~datasource_kit.registry.Registry` and can
 be described declaratively with :class:`~datasource_kit.manifest.Manifest`.
@@ -22,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from .journal import ensure_update_log, now_utc, record_update
 from .manifest import Manifest, SourceContract
-from .protocols import DataSource, IngestActor
+from .protocols import ArtifactStore, DataSource, IngestActor
 from .rate_limit import TokenBucket
 from .registry import Registry
 from .retry import retry
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from .scheduler import WorkerScheduler
 
 __all__ = [
+    "ArtifactStore",
     "DataSource",
     "IngestActor",
     "Manifest",
