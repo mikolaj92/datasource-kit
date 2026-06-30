@@ -1,0 +1,19 @@
+{
+  "name": "demo-scraper",
+  "source_type": "scraper",
+  "providers": {
+    "enumerator": "window.by_day",
+    "fetcher": "fetch.mock",
+    "mapper": "records.passthrough",
+    "diff": "diff.by_id",
+    "assess": "assess.passthrough",
+    "store": "store.in_memory"
+  },
+  "policies": {
+    "rate_limit": {"rate": 5.0, "capacity": 5.0},
+    "retry": {"attempts": 3, "base_delay": 0.0, "max_delay": 0.0},
+    "coverage_unit": "window"
+  },
+  "status_vocabulary": ["working", "done", "blocked"],
+  "completeness_layers": ["records"]
+}
