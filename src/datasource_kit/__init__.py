@@ -29,6 +29,8 @@ from .errors import (
     ProviderError,
     RegistryError,
     RuntimeStepError,
+    SourceError,
+    TransportError,
     ValidationError,
 )
 from .journal import ensure_update_log, now_utc, record_update
@@ -94,10 +96,12 @@ __all__ = [
     "RegistryError",
     "RuntimeStepError",
     "SourceContract",
+    "SourceError",
     "SourceProfile",
     "StoragePort",
     "SupportsExistingIds",
     "TokenBucket",
+    "TransportError",
     "ValidationError",
     "WorkerScheduler",
     "WindowIterator",
