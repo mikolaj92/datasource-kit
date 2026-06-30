@@ -1,0 +1,11 @@
+{
+  "name": "demo-scraper",
+  "providers": {
+    "diff": "by_id",
+    "assess": "passthrough"
+  },
+  "policies": {
+    "max_retries": 1,
+    "id_field": "id"
+  }
+}

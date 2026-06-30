@@ -1,12 +1,15 @@
 [project]
 name = "datasource-kit"
 version = "0.1.0"
-description = "Generic, dependency-free toolkit for managing many datasources (batch reference-data updaters and long-running scraper workers)."
+description = "Domain-blind ingest framework (archetype + profiles + registry + runtime) that keeps its primitives-library face."
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
 dependencies = []
+
+[project.scripts]
+datasource-kit = "datasource_kit.__main__:main"
 
 [project.optional-dependencies]
 scheduler = ["apscheduler>=3.10"]

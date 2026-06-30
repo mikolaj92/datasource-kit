@@ -1,44 +1,97 @@
 # datasource-kit
 
-A small, **dependency-free** toolkit for managing *many* datasources from one
-place. It captures the plumbing that repeats across every datasource so projects
-can focus on **what** each source is, not **how** the machinery runs.
+A **domain-blind ingest FRAMEWORK** — sibling of reviewkit/splot/fala — that
+also keeps its **primitives-library face**. It owns the generic HOW (a named
+runtime driving a pipeline, policies-as-data, diff/assess providers, ledger,
+report) and refuses the WHAT (which source, endpoints, parsing, identity rules,
+completeness-layer taxonomy, grading verdict).
 
-It deliberately supports **two models** behind one tiny surface:
+*"Gives us a generic way of doing something, but doesn't say what to do."*
 
-| Model | Who | Shape |
-|---|---|---|
-| **Batch reference-data** | MSDS Portal `datasources/` | download an official dataset → reload a local SQLite store → answer lookups |
-| **Scraper / crawler** | Temida/hermes datasources | consume a queued job → fetch from an upstream surface → yield domain objects |
+---
 
-The kit imposes neither model on the other. A batch source implements
-`DataSource`; a scraper implements `IngestActor`; both can register into one
-`Registry` and describe themselves with a `Manifest`.
+## Core Archetype
+
+```
+enumerate -> fetch -> persist -> diff -> assess -> report
+```
+
+Driven over a window/checkpoint loop with rate-limit + retry wired automatically
+around provider hooks. `diff` and `assess` are **profile-named providers** so
+the batch full-replace model is expressible without window/id ceremony:
+
+| Provider name        | Behaviour                                                   |
+|----------------------|-------------------------------------------------------------|
+| `diff.by_id`         | Compare existing ids against fetched; surface new items     |
+| `diff.full_replace`  | Treat all fetched items as new; ignore existing state       |
+| `assess.passthrough` | Return `"ok"` — assessment verdict lives in the consumer    |
+
+`builtin_registry()` ships all three. The consumer plugs in by declaring a
+**profile folder** (`source.json`) that names safe registered providers and
+carries policies-as-data. Never by subclassing kit internals.
+
+---
+
+## It is NOT
+
+- NOT a scraper/crawler for any specific source; knows nothing about
+  ELI/SAOS/courts/legal/Polish anything.
+- NOT a mandatory runtime — the primitives (`DataSource`, `IngestActor`,
+  `Registry`, `Manifest`, journal helpers, `TokenBucket`, `retry`) are fully
+  usable with no `run_ingest`.
+- Does NOT own business logic, parsing, identity/dedup rules, a job queue, the
+  runtime supervisor, the completeness-layer taxonomy, or the GRADING POLICY.
+- The ledger ships **counts only** — no `lifecycle_state`, no
+  count→verdict classifier. The verdict enters only as a consumer-registered
+  `assess.*` provider mapping evidence to the consumer's own status strings.
+- `validate_source` checks **only provider registration** — no business rules.
+
+---
 
 ## What's in the box
 
+### Primitives (zero dependencies — always available)
+
+- `protocols.DataSource` / `protocols.IngestActor` — `runtime_checkable`
+  structural protocols; existing classes satisfy them without importing the kit.
+- `registry.Registry[T]` — name-keyed registry with duplicate protection.
+- `manifest.Manifest` / `manifest.SourceContract` — declarative source
+  descriptors (data, not code).
 - `journal` — `now_utc`, `ensure_update_log`, `record_update`: the `update_log`
   bookkeeping table for batch updaters (schema-compatible with existing MSDS DBs).
 - `retry` — linear-backoff synchronous retry around a single flaky call.
 - `rate_limit.TokenBucket` — thread-safe throttle for scraper sources.
-- `registry.Registry[T]` — name-keyed registry with duplicate protection.
-- `protocols.DataSource` / `protocols.IngestActor` — `runtime_checkable`
-  structural protocols; existing classes satisfy them without importing the kit.
-- `manifest.Manifest` / `manifest.SourceContract` — declarative source
-  descriptors (data, not code).
+- `storage.ArtifactStore` (protocol) + `storage.InMemoryArtifactStore` — seam
+  between the runtime and persistence; `full_replace` for the batch model.
+- `ledger.DiscoveryLedger` + `ledger.Evidence` — counts-only accumulator; no
+  lifecycle state, no classifier.
 
-- `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
-  an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
+### Opt-in archetype runtime
 
-The core package has **no third-party runtime dependencies** (Python ≥ 3.12).
-Only `WorkerScheduler` needs the extra, and it is imported lazily so plain
-`import datasource_kit` never pulls in APScheduler:
+- `providers.ProviderRegistry` + `providers.builtin_registry()` — maps
+  `kind:name` to callables; ships `diff.by_id`, `diff.full_replace`,
+  `assess.passthrough`.
+- `ingest.run_ingest` — drives the Core Archetype pipeline; fails closed on
+  partial provider coverage; returns `ingest.IngestReport`.
+- `profile.SourceProfile` + `profile.load_profile` + `profile.validate_source`
+  — profile-folder loader; validation checks provider registration only.
+
+### Optional extras
+
+- `scheduler.WorkerScheduler` — behind the `scheduler` extra (APScheduler);
+  imported lazily so `import datasource_kit` never pulls in APScheduler.
+
+---
+
+## Install
 
 ```bash
+pip install "datasource-kit"
+# with the scheduler extra:
 pip install "datasource-kit[scheduler]"
 ```
 
-## Install (path dependency)
+### Path dependency (editable)
 
 ```toml
 # consumer pyproject.toml
@@ -46,9 +99,22 @@ pip install "datasource-kit[scheduler]"
 datasource-kit = { path = "../datasource-kit", editable = true }
 ```
 
+---
+
+## Standalone demo (no network, no extras, no consumer code)
+
+```bash
+datasource-kit examples run demo-scraper
+```
+
+This runs `builtin_registry()` + `InMemoryArtifactStore` + fake records through
+the full `run_ingest` pipeline and prints a coverage report.
+
+---
+
 ## Usage
 
-### Batch reference-data source
+### Batch reference-data source (primitives only, no `run_ingest`)
 
 ```python
 import sqlite3
@@ -72,46 +138,67 @@ def update_database(*, db_path) -> dict:
 from datasource_kit import Registry
 
 registry: Registry = Registry()
-registry.register(CLPDataSource())      # uses .name if present, else pass name=...
+registry.register(CLPDataSource())          # uses .name if present
 registry.register(PRTRDataSource(), name="prtr")
 registry.get("prtr").lookup("7440-43-9")
 ```
 
-### Describing a source declaratively
+### Running the archetype pipeline
 
 ```python
-from datasource_kit import Manifest, SourceContract
+from datasource_kit import builtin_registry, run_ingest, InMemoryArtifactStore
 
-Manifest(name="clp", source_type="batch")  # batch needs nothing else
-
-Manifest(
-    name="saos",
-    source_type="scraper",
-    supports_autonomous=True,               # autonomous => contract required
-    rate_limit={"rps": 1.0, "burst": 2.0},
-    contract=SourceContract(
-        source_truth="Official SAOS API dump/search/detail surfaces.",
-        enumeration_method="API-first dump/search/coverage-window traversal.",
-        evidence=("API dump pages", "detail responses"),
-        identity_strategy="SAOS judgment identifier.",
-        diff_target="canonical judgment corpus",
-        coverage_unit="API page or date coverage window",
-    ),
+store = InMemoryArtifactStore()
+report = run_ingest(
+    enumerator=lambda: my_source.enumerate(),
+    fetcher=lambda job: my_source.fetch(job),
+    store=store,
+    registry=builtin_registry(),
+    diff_provider="by_id",
+    assess_provider="passthrough",
 )
+print(report.summary())
 ```
+
+### Declaring a source as a profile
+
+`examples/demo-scraper/source.json`:
+
+```json
+{
+  "name": "demo-scraper",
+  "providers": {
+    "diff": "by_id",
+    "assess": "passthrough"
+  },
+  "policies": {
+    "max_retries": 1
+  }
+}
+```
+
+```python
+from datasource_kit import load_profile, validate_source, builtin_registry
+
+profile = load_profile("examples/demo-scraper/source.json")
+errors = validate_source(profile, builtin_registry())
+assert not errors
+```
+
+---
 
 ## Design notes
 
-- **Stdlib only** so both a lightweight batch repo and a heavy scraper repo can
-  adopt it without dependency friction.
+- **Stdlib only** — no third-party runtime dependencies.
 - **Structural protocols, not base classes** — existing datasource classes
-  already satisfy `DataSource` / `IngestActor` without inheritance or imports.
-- The heavyweight scraper apparatus (job queue, coverage windows, runtime
-  supervisor) intentionally lives in the *consuming* project, not here. The kit
-  provides the shared vocabulary and primitives, not an orchestrator.
+  satisfy `DataSource` / `IngestActor` without inheritance.
+- The heavyweight apparatus (job queue, runtime supervisor, completeness verdict)
+  lives in the *consuming* project. The kit ships the generic machinery.
+- `run_ingest` is one composition of the primitives, never the mandatory path.
 
 ## Development
 
 ```bash
 uv run pytest
+datasource-kit examples run demo-scraper
 ```
