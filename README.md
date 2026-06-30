@@ -1,60 +1,85 @@
 # datasource-kit
 
-A small, **dependency-free** toolkit for managing *many* datasources from one
-place. It captures the plumbing that repeats across every datasource so projects
-can focus on **what** each source is, not **how** the machinery runs.
+A domain-blind ingest framework. It owns the generic **how**: a named runtime,
+window/checkpoint loop, rate-limit and retry mechanics, provider validation,
+explainable reports, errors, and a CLI. It refuses the **what**: which source,
+which endpoints, parsing, identity rules, completeness layer names, and grading
+verdicts.
 
-It deliberately supports **two models** behind one tiny surface:
+It has two honest faces:
 
-| Model | Who | Shape |
-|---|---|---|
-| **Batch reference-data** | MSDS Portal `datasources/` | download an official dataset → reload a local SQLite store → answer lookups |
-| **Scraper / crawler** | Temida/hermes datasources | consume a queued job → fetch from an upstream surface → yield domain objects |
+- a primitives library: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
+  `journal`, `results`, `window`, `ledger`, `ratelimit`, `retry`,
+  `completeness`, and structural storage/artifact protocols;
+- an opt-in `run_ingest` runtime, which is one composition of those primitives,
+  never the only way to use the kit.
 
-The kit imposes neither model on the other. A batch source implements
-`DataSource`; a scraper implements `IngestActor`; both can register into one
-`Registry` and describe themselves with a `Manifest`.
+## Core Archetype
 
-## What's in the box
-
-- `journal` — `now_utc`, `ensure_update_log`, `record_update`: the `update_log`
-  bookkeeping table for batch updaters (schema-compatible with existing MSDS DBs).
-- `retry` — linear-backoff synchronous retry around a single flaky call.
-- `rate_limit.TokenBucket` — thread-safe throttle for scraper sources.
-- `registry.Registry[T]` — name-keyed registry with duplicate protection.
-- `protocols.DataSource` / `protocols.IngestActor` — `runtime_checkable`
-  structural protocols; existing classes satisfy them without importing the kit.
-- `protocols.ArtifactStore` — tiny bytes-in/ref-out artifact seam for runtimes
-  that need to persist scraper payloads outside the domain object stream.
-- `manifest.Manifest` / `manifest.SourceContract` — declarative source
-  descriptors (data, not code).
-
-- `scheduler.WorkerScheduler` — *optional*, behind the `scheduler` extra:
-  an APScheduler-backed helper to run a poll/dispatch loop on a fixed interval.
-- `adapters.fala.FalaArtifactStore` — *optional*, behind the `fala` extra:
-  a thin adapter over Fala's file artifact store for blob/artifact persistence
-  and synchronous resolution. It is **not** a queue.
-
-The core package has **no third-party runtime dependencies** (Python ≥ 3.12).
-Optional integrations are imported lazily so plain `import datasource_kit` never
-pulls in APScheduler or Fala:
-
-```bash
-pip install "datasource-kit[scheduler]"
-pip install "datasource-kit[fala]"
+```text
+enumerate -> fetch -> persist -> diff -> assess -> report
+   |          |         |         |         |         |
+ window/   throttle  validated  by_id /  counts ->  IngestReport
+ checkpoint + retry  records    full_    consumer   + optional per-layer
+ loop      evidence  only       replace  status     CompletenessReport
 ```
 
-## Install (path dependency)
+`run_ingest()` wires `TokenBucket` throttling and `with_retry` around registered
+provider hooks. The profile chooses provider names such as `diff.by_id`,
+`diff.full_replace`, and `assess.passthrough`; the registry resolves them
+fail-closed before the run starts.
+
+## Quickstart
+
+The shipped demos use JSON profiles, in-memory stores, mock fetchers, no
+network, and no third-party dependency:
+
+```bash
+datasource-kit examples run demo-scraper
+datasource-kit examples run demo-batch --out report.json
+datasource-kit coverage report report.json
+datasource-kit explain report.json
+```
+
+A consumer supplies two things:
+
+- a profile folder, usually `source.json`, naming registered providers and
+  carrying policy numbers plus its own `status_vocabulary` and
+  `completeness_layers`;
+- provider implementations registered by safe name. Providers satisfy
+  structural protocols; consumers do not subclass kit internals.
+
+## It is NOT
+
+- Not a crawler or scraper for any specific source. The kit ships `fetch.mock`;
+  real HTTP, browser, parsing, and identity logic are injected by the consumer.
+- No domain vocabulary. Source names, record identity, status labels, and layer
+  meanings live in the profile and providers.
+- No default completeness taxonomy. `CompletenessReport.fraction()` is math, not
+  a verdict.
+- No grading classifier. Counts do not become `complete`, `partial`, or any
+  other business status unless a consumer-registered `assess.*` provider says
+  so.
+- Not a mandatory orchestrator. Batch consumers can use `DataSource`, `journal`,
+  `Registry`, and the pure-data shapes directly without `run_ingest`.
+- Not a job queue. Scheduling and supervision remain in the consuming project.
+
+## Install
 
 ```toml
-# consumer pyproject.toml
 [tool.uv.sources]
 datasource-kit = { path = "../datasource-kit", editable = true }
 ```
 
-## Usage
+Core has no third-party runtime dependencies. Optional integrations are lazy:
 
-### Batch reference-data source
+```bash
+pip install "datasource-kit[profiles]"   # YAML profile loading
+pip install "datasource-kit[scheduler]"  # APScheduler helper
+pip install "datasource-kit[fala]"       # Fala artifact adapter
+```
+
+## Minimal Batch Usage
 
 ```python
 import sqlite3
@@ -64,70 +89,36 @@ def update_database(*, db_path) -> dict:
     con = sqlite3.connect(db_path)
     try:
         ensure_update_log(con)
-        payload = retry(lambda: download(SOURCE_URL))
+        payload = retry(lambda: download())
         rows = load_rows(con, payload)
-        record_update(con, dataset="clp", records_loaded=rows, details={"source": SOURCE_URL})
-        return {"dataset": "clp", "rows_loaded": rows}
+        record_update(con, dataset="records", records_loaded=rows)
+        return {"rows_loaded": rows}
     finally:
         con.close()
 ```
 
-### Registering sources
+## Profile Example
 
-```python
-from datasource_kit import Registry
-
-registry: Registry = Registry()
-registry.register(CLPDataSource())      # uses .name if present, else pass name=...
-registry.register(PRTRDataSource(), name="prtr")
-registry.get("prtr").lookup("7440-43-9")
+```json
+{
+  "name": "demo-scraper",
+  "source_type": "scraper",
+  "providers": {
+    "enumerator": "window.by_day",
+    "fetcher": "fetch.mock",
+    "mapper": "records.passthrough",
+    "diff": "diff.by_id",
+    "assess": "assess.passthrough",
+    "store": "store.in_memory"
+  },
+  "policies": {
+    "rate_limit": {"rate": 5.0, "capacity": 5.0},
+    "retry": {"attempts": 3, "base_delay": 0.0, "max_delay": 0.0}
+  },
+  "status_vocabulary": ["ok"],
+  "completeness_layers": ["records"]
+}
 ```
-
-### Describing a source declaratively
-
-```python
-from datasource_kit import Manifest, SourceContract
-
-Manifest(name="clp", source_type="batch")  # batch needs nothing else
-
-Manifest(
-    name="saos",
-    source_type="scraper",
-    supports_autonomous=True,               # autonomous => contract required
-    rate_limit={"rps": 1.0, "burst": 2.0},
-    contract=SourceContract(
-        source_truth="Official SAOS API dump/search/detail surfaces.",
-        enumeration_method="API-first dump/search/coverage-window traversal.",
-        evidence=("API dump pages", "detail responses"),
-        identity_strategy="SAOS judgment identifier.",
-        diff_target="canonical judgment corpus",
-        coverage_unit="API page or date coverage window",
-    ),
-)
-```
-
-### Fala artifact backend
-
-```python
-from datasource_kit.adapters.fala import FalaArtifactStore
-
-artifacts = FalaArtifactStore("./artifacts")
-ref = artifacts.store(b"raw upstream payload")
-payload = artifacts.resolve(ref)
-```
-
-The Fala adapter only bridges blob/artifact storage. Job queues, dispatch loops,
-and worker supervision remain in the consuming project.
-
-## Design notes
-
-- **Stdlib only** so both a lightweight batch repo and a heavy scraper repo can
-  adopt it without dependency friction.
-- **Structural protocols, not base classes** — existing datasource classes
-  already satisfy `DataSource` / `IngestActor` without inheritance or imports.
-- The heavyweight scraper apparatus (job queue, coverage windows, runtime
-  supervisor) intentionally lives in the *consuming* project, not here. The kit
-  provides the shared vocabulary and primitives, not an orchestrator.
 
 ## Development
 
