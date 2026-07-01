@@ -61,7 +61,7 @@ from .results import (
     completed_result,
     working_result,
 )
-from .retry import retry
+from .retry import retry, retry_decorator
 from .runtime import run_ingest
 from .window import DayWindow, WindowIterator, split_range_into_days
 
@@ -115,6 +115,7 @@ __all__ = [
     "now_utc",
     "record_update",
     "retry",
+    "retry_decorator",
     "run_ingest",
     "split_range_into_days",
     "validate_source",
