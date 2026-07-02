@@ -1,17 +1,20 @@
 """datasource-kit: a generic, dependency-free toolkit for managing many datasources.
 
-It supports two models behind one small surface:
+It supports three faces:
 
-* batch reference-data updaters -- :class:`~datasource_kit.protocols.DataSource`
-  plus the :mod:`~datasource_kit.journal` update-log primitives and
-  :func:`~datasource_kit.retry.retry`;
-* long-running scraper workers -- :class:`~datasource_kit.protocols.IngestActor`
-  plus :class:`~datasource_kit.rate_limit.TokenBucket`.
-* artifact backends -- :class:`~datasource_kit.protocols.ArtifactStore` for
-  bytes-in/ref-out payload persistence.
+* **Ingest primitives** -- batch reference-data updaters and long-running
+  scraper workers built on :class:`~datasource_kit.protocols.DataSource`,
+  :class:`~datasource_kit.protocols.IngestActor`, journal, rate-limit, and
+  retry mechanics, plus the opt-in ``run_ingest`` runtime.
+* **Artifact backends** -- :class:`~datasource_kit.protocols.ArtifactStore`
+  for bytes-in/ref-out payload persistence.
+* **Fleet supervision** -- :mod:`~datasource_kit.fleet` domain-blind process
+  supervision primitives (spawn, stop, liveness) for long-lived worker OS
+  processes.
 
-Both kinds register into one :class:`~datasource_kit.registry.Registry` and can
-be described declaratively with :class:`~datasource_kit.manifest.Manifest`.
+Both ingest models register into one :class:`~datasource_kit.registry.Registry`
+and can be described declaratively with
+:class:`~datasource_kit.manifest.Manifest`.
 
 An optional :class:`~datasource_kit.scheduler.WorkerScheduler` (behind the
 ``scheduler`` extra) can drive a poll loop; it is imported lazily so the core
@@ -33,6 +36,7 @@ from .errors import (
     TransportError,
     ValidationError,
 )
+from .fleet import Liveness, ProcessSpec, SpawnResult, StopResult, liveness, spawn, stop
 from .journal import ensure_update_log, now_utc, record_update
 from .ledger import DiscoveredItem, DiscoveryLedgerStore, Evidence, LedgerSummary
 from .manifest import Manifest, SourceContract
@@ -86,9 +90,11 @@ __all__ = [
     "IngestActor",
     "LayerCoverage",
     "LedgerSummary",
+    "Liveness",
     "Manifest",
     "MockEnumerator",
     "MockFetcher",
+    "ProcessSpec",
     "ProfileError",
     "ProviderError",
     "ProviderRegistry",
@@ -98,6 +104,8 @@ __all__ = [
     "SourceContract",
     "SourceError",
     "SourceProfile",
+    "SpawnResult",
+    "StopResult",
     "StoragePort",
     "SupportsExistingIds",
     "TokenBucket",
@@ -111,13 +119,16 @@ __all__ = [
     "completed_result",
     "ensure_update_log",
     "layers_from_names",
+    "liveness",
     "load_profile",
     "now_utc",
     "record_update",
     "retry",
     "retry_decorator",
     "run_ingest",
+    "spawn",
     "split_range_into_days",
+    "stop",
     "validate_source",
     "working_result",
 ]

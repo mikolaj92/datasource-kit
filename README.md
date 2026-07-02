@@ -6,13 +6,16 @@ explainable reports, errors, and a CLI. It refuses the **what**: which source,
 which endpoints, parsing, identity rules, completeness layer names, and grading
 verdicts.
 
-It has two honest faces:
+It has three honest faces:
 
-- a primitives library: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
+- a **primitives library**: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
   `journal`, `results`, `window`, `ledger`, `ratelimit`, `retry`,
   `completeness`, and structural storage/artifact protocols;
-- an opt-in `run_ingest` runtime, which is one composition of those primitives,
-  never the only way to use the kit.
+- an **opt-in runtime**: `run_ingest`, which is one composition of those
+  primitives, never the only way to use the kit;
+- a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
+  process supervision primitives (spawn, stop, liveness) for long-lived
+  worker OS processes.
 
 ## Core Archetype
 
@@ -63,6 +66,25 @@ A consumer supplies two things:
 - Not a mandatory orchestrator. Batch consumers can use `DataSource`, `journal`,
   `Registry`, and the pure-data shapes directly without `run_ingest`.
 - Not a job queue. Scheduling and supervision remain in the consuming project.
+- **Not a scheduler, cron, or daemon**. The `fleet` module provides process
+  primitives only; policy stays in the consumer.
+
+## Fleet Supervision
+
+The `datasource_kit.fleet` module provides stdlib-only process supervision
+primitives for long-lived worker OS processes:
+
+- `ProcessSpec(unit, command, cwd, env, label)` -- declarative unit description
+  built by the consumer.
+- `spawn(spec) -> SpawnResult` -- starts a subprocess with `start_new_session`,
+  writes pid.json atomically, and performs a fail-closed immediate-exit probe.
+- `stop(unit_dir, timeout) -> StopResult` -- SIGTERM to the process group,
+  escalates to SIGKILL after timeout; cleans up stale pid files.
+- `liveness(unit_dir) -> Liveness` -- returns `"running"`, `"stopped"`, or
+  `"stale"` from pid.json and OS-level checks.
+
+POSIX only. No scheduler, no cron, no daemon -- these are primitives; policy
+stays in the consuming project.
 
 ## Install
 
