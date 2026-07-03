@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -13,13 +14,22 @@ from pathlib import Path
 import pytest
 
 from datasource_kit.fleet import (
+    DESIRED_DISABLED,
+    DESIRED_ENABLED,
+    GENERATION_ENV,
+    DesiredStateReconciler,
     Liveness,
     ProcessSpec,
+    ReconcileOutcome,
     SpawnResult,
     StopResult,
+    SupervisorLockError,
+    honor_desired_state,
     liveness,
+    read_json,
     spawn,
     stop,
+    write_json_atomic,
 )
 
 PYTHON = sys.executable
@@ -245,3 +255,295 @@ def test_fleet_exports_public_api() -> None:
     assert dk.spawn is spawn
     assert dk.stop is stop
     assert dk.liveness is liveness
+    assert dk.DesiredStateReconciler is DesiredStateReconciler
+    assert dk.ReconcileOutcome is ReconcileOutcome
+    assert dk.honor_desired_state is honor_desired_state
+    assert dk.write_json_atomic is write_json_atomic
+    assert dk.read_json is read_json
+
+
+# ---------------------------------------------------------------------------
+# Atomic JSON helpers
+# ---------------------------------------------------------------------------
+
+
+def test_write_json_atomic_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "state.json"
+    write_json_atomic(path, {"b": 2, "a": 1})
+    assert read_json(path) == {"a": 1, "b": 2}
+    # No stray tmp file is left behind.
+    assert not (path.parent / "state.json.tmp").exists()
+
+
+def test_read_json_missing_and_corrupt(tmp_path: Path) -> None:
+    assert read_json(tmp_path / "nope.json") is None
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert read_json(corrupt) is None
+    # A JSON scalar (not an object) is rejected.
+    scalar = tmp_path / "scalar.json"
+    scalar.write_text("42", encoding="utf-8")
+    assert read_json(scalar) is None
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: state + policy
+# ---------------------------------------------------------------------------
+
+
+def _recording_spawn() -> tuple[list[tuple[str, int]], object]:
+    """Return (calls, action); action records (unit, generation) and is alive.
+
+    Faithful to the real spawn contract: it writes ``pid.json`` (pointing at a
+    live pid -- this test process) so a later ``observe_actual`` reports the
+    unit as running, exactly as :func:`spawn` would.
+    """
+    calls: list[tuple[str, int]] = []
+
+    def action(spec: ProcessSpec, generation: int, unit_dir: Path) -> SpawnResult:
+        calls.append((spec.unit, generation))
+        write_json_atomic(
+            unit_dir / "pid.json",
+            {"pid": os.getpid(), "command": list(spec.command), "started_at": 1.0},
+        )
+        return SpawnResult(pid=os.getpid(), started_at=1.0, alive=True)
+
+    return calls, action
+
+
+def _recording_stop() -> tuple[list[Path], object]:
+    calls: list[Path] = []
+
+    def action(unit_dir: Path) -> StopResult:
+        calls.append(unit_dir)
+        return StopResult(pid=1, signalled=True, killed=False, cleaned=False)
+
+    return calls, action
+
+
+def test_default_state_and_set_desired(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    state = rec.load_state("eli")
+    assert state["desired"] == DESIRED_DISABLED
+    assert state["generation"] == 0
+    assert state["pid"] is None
+
+    rec.enable("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_ENABLED
+    rec.disable("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_DISABLED
+
+
+def test_set_desired_rejects_bad_value(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    with pytest.raises(ValueError):
+        rec.set_desired("eli", "paused")
+
+
+def test_honor_desired_state_policy() -> None:
+    assert honor_desired_state({"desired": DESIRED_ENABLED}) is True
+    assert honor_desired_state({"desired": DESIRED_DISABLED}) is False
+    assert honor_desired_state({}) is False
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: converge
+# ---------------------------------------------------------------------------
+
+
+def test_converge_spawns_enabled_unit(tmp_path: Path) -> None:
+    calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+
+    rec.enable("eli")
+    outcome = rec.reconcile_unit(spec, honor_desired_state)
+
+    assert outcome.action == "spawned"
+    assert outcome.generation == 1  # 0 -> 1 on first spawn
+    assert outcome.actual == "running"
+    assert calls == [("eli", 1)]
+    assert rec.load_state("eli")["generation"] == 1
+
+
+def test_converge_noop_when_disabled(tmp_path: Path) -> None:
+    calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+
+    outcome = rec.reconcile_unit(spec, honor_desired_state)
+    assert outcome.action == "noop"
+    assert outcome.actual == "stopped"
+    assert calls == []
+
+
+def test_converge_stops_disabled_running_unit(tmp_path: Path) -> None:
+    stop_calls, stop_action = _recording_stop()
+    rec = DesiredStateReconciler(tmp_path, stop_action=stop_action)
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+
+    # A genuinely-running child so observe_actual reports "running".
+    proc = subprocess.Popen(
+        [PYTHON, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        write_json_atomic(
+            rec.unit_dir("eli") / "pid.json",
+            {"pid": proc.pid, "command": [], "started_at": time.time()},
+        )
+        rec.disable("eli")
+        outcome = rec.reconcile_unit(spec, honor_desired_state)
+        assert outcome.action == "stopped"
+        assert outcome.actual == "stopped"
+        assert stop_calls == [rec.unit_dir("eli")]
+        assert rec.load_state("eli")["pid"] is None
+    finally:
+        os.kill(proc.pid, signal.SIGKILL)
+
+
+def test_default_spawn_action_injects_generation(tmp_path: Path) -> None:
+    """The default spawn action stamps GENERATION_ENV into the child env."""
+    rec = DesiredStateReconciler(tmp_path)
+    marker = tmp_path / "gen.txt"
+    spec = ProcessSpec(
+        unit="eli",
+        command=(
+            PYTHON,
+            "-c",
+            f"import os; open({str(marker)!r},'w').write("
+            f"os.environ['{GENERATION_ENV}']); import time; time.sleep(30)",
+        ),
+    )
+    rec.enable("eli")
+    outcome = rec.reconcile_unit(spec, honor_desired_state)
+    try:
+        assert outcome.alive is True
+        # The child observed generation 1 in its environment.
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not marker.exists():
+            time.sleep(0.05)
+        assert marker.read_text(encoding="utf-8") == "1"
+    finally:
+        if outcome.pid:
+            os.kill(outcome.pid, signal.SIGKILL)
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: generation fencing
+# ---------------------------------------------------------------------------
+
+
+def test_merge_heartbeat_generation_fencing(tmp_path: Path) -> None:
+    _, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+    rec.enable("eli")
+    rec.reconcile_unit(spec, honor_desired_state)  # generation -> 1
+
+    # Stale generation (0) from a zombie of the previous generation: rejected.
+    state = rec.merge_heartbeat("eli", {"generation": 0, "handled_count": 99})
+    assert "handled_count" not in state
+
+    # Matching generation (1): merged.
+    state = rec.merge_heartbeat("eli", {"generation": 1, "handled_count": 7})
+    assert state["handled_count"] == 7
+    # Reconciler-owned fields are never taken from a heartbeat.
+    state = rec.merge_heartbeat(
+        "eli", {"generation": 1, "desired": "disabled", "generation_from_hb": 5}
+    )
+    assert state["desired"] == DESIRED_ENABLED
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: supervisor lock
+# ---------------------------------------------------------------------------
+
+
+def test_lock_acquire_release(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    owner = rec.acquire_lock()
+    assert owner["pid"] == os.getpid()
+    assert (tmp_path / "supervisor.lock").exists()
+    assert rec.release_lock() is True
+    assert not (tmp_path / "supervisor.lock").exists()
+
+
+def test_lock_raises_on_live_foreign_owner(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    # A live foreign owner: this test process's parent is alive, but use a
+    # separate live pid we control.
+    proc = subprocess.Popen(
+        [PYTHON, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        write_json_atomic(
+            tmp_path / "supervisor.lock",
+            {"pid": proc.pid, "hostname": socket.gethostname(), "started_at": 1.0},
+        )
+        with pytest.raises(SupervisorLockError):
+            rec.acquire_lock()
+    finally:
+        os.kill(proc.pid, signal.SIGKILL)
+
+
+def test_lock_steals_dead_owner(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    write_json_atomic(
+        tmp_path / "supervisor.lock",
+        {"pid": 999_999_999, "hostname": socket.gethostname(), "started_at": 1.0},
+    )
+    owner = rec.acquire_lock()  # dead owner -> stolen
+    assert owner["pid"] == os.getpid()
+    rec.release_lock()
+
+
+def test_hold_lock_context_manager(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    with rec.hold_lock():
+        assert (tmp_path / "supervisor.lock").exists()
+    assert not (tmp_path / "supervisor.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: reconcile_once + serve
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_once_takes_lock_and_releases(tmp_path: Path) -> None:
+    calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    specs = [
+        ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass")),
+        ProcessSpec(unit="saos", command=(PYTHON, "-c", "pass")),
+    ]
+    rec.enable("eli")
+    outcomes = rec.reconcile_once(specs, honor_desired_state)
+    assert {o.unit: o.action for o in outcomes} == {"eli": "spawned", "saos": "noop"}
+    assert calls == [("eli", 1)]
+    assert not (tmp_path / "supervisor.lock").exists()  # released
+
+
+def test_serve_runs_until_stop_condition(tmp_path: Path) -> None:
+    calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    specs = [ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))]
+    rec.enable("eli")
+
+    passes = {"n": 0}
+
+    def stop_after_two() -> bool:
+        passes["n"] += 1
+        return passes["n"] >= 2
+
+    rec.serve(specs, honor_desired_state, interval=0.0, stop_condition=stop_after_two)
+    assert passes["n"] == 2
+    # First pass spawns; the recorded spawn keeps state "running" so the
+    # second pass is a no-op -> only one spawn call.
+    assert calls == [("eli", 1)]
+    assert not (tmp_path / "supervisor.lock").exists()

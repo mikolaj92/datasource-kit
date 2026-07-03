@@ -14,8 +14,10 @@ It has three honest faces:
 - an **opt-in runtime**: `run_ingest`, which is one composition of those
   primitives, never the only way to use the kit;
 - a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
-  process supervision primitives (spawn, stop, liveness) for long-lived
-  worker OS processes.
+  process supervision primitives (spawn, stop, liveness) plus a
+  `DesiredStateReconciler` (desired/actual state files, generation fencing, an
+  exclusive supervisor lock, a converge loop) for long-lived worker OS
+  processes.
 
 ## Core Archetype
 
@@ -85,6 +87,34 @@ primitives for long-lived worker OS processes:
 
 POSIX only. No scheduler, no cron, no daemon -- these are primitives; policy
 stays in the consuming project.
+
+### Desired-state reconciliation
+
+`DesiredStateReconciler` builds a generic supervisor on those primitives: the
+consumer declares which units should be running and the reconciler converges
+reality to that declaration, without each consumer re-implementing the
+lock / generation-fencing / atomic-write mechanics.
+
+- Per-unit `state.json` (desired / actual / generation), written atomically;
+  `write_json_atomic` / `read_json` are exposed for reuse.
+- **Generation fencing**: each (re)spawn increments a generation and the child
+  is spawned aware of it (the default action injects `DATASOURCE_KIT_GENERATION`;
+  a consumer that injects its own spawn action picks its own variable). A
+  `merge_heartbeat` is accepted only when the reporting generation matches, so a
+  zombie from a previous generation can never overwrite current state.
+- **Exclusive supervisor lock with dead-owner steal**: a lock held by a dead
+  pid (same host) is stolen; a live foreign owner raises `SupervisorLockError`;
+  a foreign host is treated as held (fail closed).
+- `reconcile_once(specs, policy)` converges every unit once under the lock;
+  `serve(specs, policy, interval)` holds the lock and reconciles on a loop. The
+  `policy` is a consumer hook (`honor_desired_state` is the default) deciding
+  per unit whether it should run -- the kit never decides which units run.
+
+Launch/stop are injectable (`spawn_action` / `stop_action`), defaulting to
+`spawn` / `stop`, so a consumer can keep a richer launch (log redirection, its
+own environment, richer pid metadata) while the kit stays domain-blind. No
+health semantics beyond process liveness -- health interpretation stays in the
+consumer.
 
 ## Install
 

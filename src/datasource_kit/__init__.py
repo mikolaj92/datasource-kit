@@ -36,7 +36,24 @@ from .errors import (
     TransportError,
     ValidationError,
 )
-from .fleet import Liveness, ProcessSpec, SpawnResult, StopResult, liveness, spawn, stop
+from .fleet import (
+    DESIRED_DISABLED,
+    DESIRED_ENABLED,
+    GENERATION_ENV,
+    DesiredStateReconciler,
+    Liveness,
+    ProcessSpec,
+    ReconcileOutcome,
+    SpawnResult,
+    StopResult,
+    SupervisorLockError,
+    honor_desired_state,
+    liveness,
+    read_json,
+    spawn,
+    stop,
+    write_json_atomic,
+)
 from .journal import ensure_update_log, now_utc, record_update
 from .ledger import DiscoveredItem, DiscoveryLedgerStore, Evidence, LedgerSummary
 from .manifest import Manifest, SourceContract
@@ -76,14 +93,18 @@ __all__ = [
     "ArtifactStore",
     "CompletenessReport",
     "Cursor",
+    "DESIRED_DISABLED",
+    "DESIRED_ENABLED",
     "DataSource",
     "DatasourceKitError",
     "DayWindow",
+    "DesiredStateReconciler",
     "DiscoveredItem",
     "DiscoveryLedgerStore",
     "Enumerator",
     "Evidence",
     "Fetcher",
+    "GENERATION_ENV",
     "IngestReport",
     "InMemoryArtifactStore",
     "InMemoryStore",
@@ -98,6 +119,7 @@ __all__ = [
     "ProfileError",
     "ProviderError",
     "ProviderRegistry",
+    "ReconcileOutcome",
     "Registry",
     "RegistryError",
     "RuntimeStepError",
@@ -107,6 +129,7 @@ __all__ = [
     "SpawnResult",
     "StopResult",
     "StoragePort",
+    "SupervisorLockError",
     "SupportsExistingIds",
     "TokenBucket",
     "TransportError",
@@ -118,10 +141,12 @@ __all__ = [
     "builtin_registry",
     "completed_result",
     "ensure_update_log",
+    "honor_desired_state",
     "layers_from_names",
     "liveness",
     "load_profile",
     "now_utc",
+    "read_json",
     "record_update",
     "retry",
     "retry_decorator",
@@ -131,6 +156,7 @@ __all__ = [
     "stop",
     "validate_source",
     "working_result",
+    "write_json_atomic",
 ]
 
 

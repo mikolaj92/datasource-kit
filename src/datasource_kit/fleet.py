@@ -18,12 +18,13 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
-import sys
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 __all__ = [
     "Liveness",
@@ -33,6 +34,19 @@ __all__ = [
     "liveness",
     "spawn",
     "stop",
+    # DesiredStateReconciler face
+    "DesiredStateReconciler",
+    "ReconcileOutcome",
+    "ReconcilePolicy",
+    "SpawnAction",
+    "StopAction",
+    "SupervisorLockError",
+    "honor_desired_state",
+    "read_json",
+    "write_json_atomic",
+    "DESIRED_ENABLED",
+    "DESIRED_DISABLED",
+    "GENERATION_ENV",
 ]
 
 # ---------------------------------------------------------------------------
@@ -229,19 +243,16 @@ def stop(
         raise FileNotFoundError(f"no pid.json in {unit_dir}")
 
     pid = int(data["pid"])
-    cleaned = False
 
     # Stale-pid detection: if the pid is not alive, clean up and report.
     if not _pid_alive(pid):
         _clean_pid(unit_dir)
         return StopResult(pid=pid, signalled=False, killed=False, cleaned=True)
 
-    signalled = False
     killed = False
 
     try:
         os.killpg(os.getpgid(pid), _STOP_SIGNAL)
-        signalled = True
     except (ProcessLookupError, PermissionError, OSError):
         # Process already gone; nothing to signal.
         _clean_pid(unit_dir)
@@ -284,3 +295,383 @@ def liveness(unit_dir: str | Path) -> Liveness:
     # Stale: pid.json exists but process is gone.  The consumer
     # is expected to call ``stop()`` to clean up stale metadata.
     return Liveness(pid=pid, state="stale")
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler
+# ---------------------------------------------------------------------------
+#
+# A generic desired-state reconciler built on the process primitives above.
+# The consumer declares which units should be running; a supervisor converges
+# reality to that declaration without each consumer re-implementing the
+# lock / generation-fencing / atomic-write mechanics.
+#
+# Boundaries: no health semantics beyond process liveness -- health
+# interpretation stays in the consumer.  Stdlib-only.
+
+_STATE_FILE = "state.json"
+_LOCK_FILE = "supervisor.lock"
+_STATE_SCHEMA_VERSION = 1
+
+#: Desired-state vocabulary persisted in ``state.json``.
+DESIRED_ENABLED = "enabled"
+DESIRED_DISABLED = "disabled"
+
+#: Environment variable the default spawn action injects into each child so a
+#: worker can stamp its heartbeats with the generation it was spawned under.
+#: Consumers that inject their own spawn action pick their own variable name.
+GENERATION_ENV = "DATASOURCE_KIT_GENERATION"
+
+
+class SupervisorLockError(RuntimeError):
+    """Raised when the exclusive supervisor lock is held by a live owner."""
+
+
+#: A policy is a consumer hook that decides, given a unit's persisted state,
+#: whether that unit should be running.  The kit never decides which units run;
+#: it converges to the consumer's declaration.  Return ``True`` to run the unit.
+ReconcilePolicy = Callable[[Mapping[str, Any]], bool]
+
+#: Injected spawn action: ``(spec, generation, unit_dir) -> SpawnResult``.
+#: The reconciler owns the generation counter and hands the new generation to
+#: the action, which is responsible for making the child aware of it (the
+#: default injects :data:`GENERATION_ENV`).
+SpawnAction = Callable[["ProcessSpec", int, Path], SpawnResult]
+
+#: Injected stop action: ``(unit_dir) -> StopResult``.
+StopAction = Callable[[Path], StopResult]
+
+
+@dataclass(slots=True, frozen=True)
+class ReconcileOutcome:
+    """Result of converging a single unit toward its desired state."""
+
+    unit: str
+    action: str  # "spawned", "stopped", or "noop"
+    desired: str  # "enabled" or "disabled"
+    actual: str  # "running" or "stopped"
+    generation: int
+    pid: int | None
+    alive: bool
+
+
+def write_json_atomic(path: str | Path, payload: Mapping[str, Any]) -> None:
+    """Atomically write *payload* as JSON to *path* (tmp file + ``replace``)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    tmp.replace(target)
+
+
+def read_json(path: str | Path) -> dict[str, Any] | None:
+    """Read a JSON object from *path*; return ``None`` if absent or corrupt."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, IsADirectoryError):
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def honor_desired_state(state: Mapping[str, Any]) -> bool:
+    """Default policy: run a unit iff its persisted desired state is enabled."""
+    return state.get("desired") == DESIRED_ENABLED
+
+
+def _default_spawn_action(
+    spec: ProcessSpec, generation: int, unit_dir: Path
+) -> SpawnResult:
+    """Spawn via :func:`spawn`, injecting the generation into the child env."""
+    env = dict(os.environ) if spec.env is None else dict(spec.env)
+    env[GENERATION_ENV] = str(generation)
+    return spawn(replace(spec, env=env), unit_dir=unit_dir)
+
+
+def _default_stop_action(unit_dir: Path) -> StopResult:
+    """Stop via :func:`stop`."""
+    return stop(unit_dir)
+
+
+class DesiredStateReconciler:
+    """Converge a fleet of units toward a consumer-declared desired state.
+
+    State layout under *root*::
+
+        <root>/<unit>/state.json   # desired/actual/generation, atomic
+        <root>/<unit>/pid.json     # written by the spawn action
+        <root>/supervisor.lock     # exclusive supervisor lock
+
+    The reconciler owns the generic mechanics (atomic state files, generation
+    fencing, the supervisor lock with dead-owner steal, the converge loop) and
+    delegates process launch/stop to injected actions so a consumer can keep a
+    richer launch (log redirection, its own env, richer pid metadata) while the
+    kit stays domain-blind.  The defaults wrap :func:`spawn`/:func:`stop`.
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        spawn_action: SpawnAction | None = None,
+        stop_action: StopAction | None = None,
+        schema_version: int = _STATE_SCHEMA_VERSION,
+    ) -> None:
+        self._root = Path(root)
+        self._spawn = spawn_action or _default_spawn_action
+        self._stop = stop_action or _default_stop_action
+        self._schema_version = schema_version
+
+    # -- paths -------------------------------------------------------------
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def unit_dir(self, unit: str) -> Path:
+        return self._root / unit
+
+    def state_file(self, unit: str) -> Path:
+        return self.unit_dir(unit) / _STATE_FILE
+
+    def _lock_path(self) -> Path:
+        return self._root / _LOCK_FILE
+
+    # -- state -------------------------------------------------------------
+
+    def _default_state(self, unit: str) -> dict[str, Any]:
+        return {
+            "schema_version": self._schema_version,
+            "unit": unit,
+            "desired": DESIRED_DISABLED,
+            "actual": "unknown",
+            "generation": 0,
+            "pid": None,
+        }
+
+    def load_state(self, unit: str) -> dict[str, Any]:
+        """Load a unit's persisted state, backfilling missing core keys."""
+        stored = read_json(self.state_file(unit))
+        state = self._default_state(unit)
+        if stored is not None:
+            state.update(stored)
+        state["unit"] = unit
+        return state
+
+    def _save_state(self, state: Mapping[str, Any]) -> None:
+        write_json_atomic(self.state_file(str(state["unit"])), state)
+
+    def set_desired(self, unit: str, desired: str) -> dict[str, Any]:
+        """Persist a unit's desired state (``enabled`` or ``disabled``)."""
+        if desired not in (DESIRED_ENABLED, DESIRED_DISABLED):
+            raise ValueError(
+                f"desired must be {DESIRED_ENABLED!r} or {DESIRED_DISABLED!r}, "
+                f"got {desired!r}"
+            )
+        state = self.load_state(unit)
+        state["desired"] = desired
+        self._save_state(state)
+        return state
+
+    def enable(self, unit: str) -> dict[str, Any]:
+        return self.set_desired(unit, DESIRED_ENABLED)
+
+    def disable(self, unit: str) -> dict[str, Any]:
+        return self.set_desired(unit, DESIRED_DISABLED)
+
+    def merge_heartbeat(
+        self, unit: str, heartbeat: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Merge a worker heartbeat into state under generation fencing.
+
+        A heartbeat is accepted only when its ``generation`` matches the
+        current one, so a zombie from a previous generation can never overwrite
+        current state.  ``unit``, ``desired``, and ``generation`` are owned by
+        the reconciler and are never taken from a heartbeat.
+        """
+        state = self.load_state(unit)
+        reported = heartbeat.get("generation")
+        if not isinstance(reported, int) or reported != int(state["generation"]):
+            return state
+        merged = dict(state)
+        for key, value in heartbeat.items():
+            if key in ("unit", "desired", "generation", "schema_version"):
+                continue
+            merged[key] = value
+        self._save_state(merged)
+        return merged
+
+    def observe_actual(self, unit: str) -> str:
+        """Return ``"running"`` or ``"stopped"``; clean up a stale pid file."""
+        try:
+            live = liveness(self.unit_dir(unit))
+        except FileNotFoundError:
+            return "stopped"
+        if live.state == "running":
+            return "running"
+        # Stale pid.json (process gone) -> clean so the unit reads as stopped.
+        _clean_pid(self.unit_dir(unit))
+        return "stopped"
+
+    # -- reconcile ---------------------------------------------------------
+
+    def reconcile_unit(
+        self, spec: ProcessSpec, policy: ReconcilePolicy
+    ) -> ReconcileOutcome:
+        """Converge a single unit toward the desired state (no lock)."""
+        unit = spec.unit
+        state = self.load_state(unit)
+        want_running = policy(state)
+        actual = self.observe_actual(unit)
+        state["actual"] = actual
+
+        if want_running and actual != "running":
+            generation = int(state["generation"]) + 1
+            result = self._spawn(spec, generation, self.unit_dir(unit))
+            state["generation"] = generation
+            state["pid"] = result.pid if result.alive else None
+            state["actual"] = "running" if result.alive else "stopped"
+            self._save_state(state)
+            return ReconcileOutcome(
+                unit=unit,
+                action="spawned",
+                desired=str(state["desired"]),
+                actual=str(state["actual"]),
+                generation=generation,
+                pid=state["pid"],
+                alive=result.alive,
+            )
+
+        if not want_running and actual == "running":
+            self._stop(self.unit_dir(unit))
+            state["pid"] = None
+            state["actual"] = "stopped"
+            self._save_state(state)
+            return ReconcileOutcome(
+                unit=unit,
+                action="stopped",
+                desired=str(state["desired"]),
+                actual="stopped",
+                generation=int(state["generation"]),
+                pid=None,
+                alive=False,
+            )
+
+        # Already converged: persist the observed actual and report no-op.
+        self._save_state(state)
+        pid = state.get("pid")
+        return ReconcileOutcome(
+            unit=unit,
+            action="noop",
+            desired=str(state["desired"]),
+            actual=actual,
+            generation=int(state["generation"]),
+            pid=pid if isinstance(pid, int) else None,
+            alive=actual == "running",
+        )
+
+    def _reconcile_all(
+        self, specs: Iterable[ProcessSpec], policy: ReconcilePolicy
+    ) -> list[ReconcileOutcome]:
+        return [self.reconcile_unit(spec, policy) for spec in specs]
+
+    def reconcile_once(
+        self, specs: Iterable[ProcessSpec], policy: ReconcilePolicy
+    ) -> list[ReconcileOutcome]:
+        """Acquire the supervisor lock, converge every unit once, release."""
+        with self.hold_lock():
+            return self._reconcile_all(specs, policy)
+
+    def serve(
+        self,
+        specs: Iterable[ProcessSpec],
+        policy: ReconcilePolicy,
+        *,
+        interval: float = 5.0,
+        stop_condition: Callable[[], bool] | None = None,
+    ) -> None:
+        """Hold the lock and reconcile on a fixed interval until stopped.
+
+        *specs* is materialized once so the same fleet is reconciled each pass.
+        *stop_condition*, when supplied, is checked after each pass; returning
+        ``True`` ends the loop (primarily a test / graceful-shutdown seam).
+        """
+        fleet = list(specs)
+        with self.hold_lock():
+            while True:
+                self._reconcile_all(fleet, policy)
+                if stop_condition is not None and stop_condition():
+                    return
+                time.sleep(interval)
+
+    # -- supervisor lock ---------------------------------------------------
+
+    def _lock_is_live(self, owner: dict[str, Any] | None) -> bool:
+        """Whether an existing lock is held by a live, foreign owner."""
+        if owner is None:
+            return False  # corrupt / empty -> stealable
+        pid = owner.get("pid")
+        if not isinstance(pid, int) or pid == os.getpid():
+            return False  # our own stale lock -> reclaimable
+        if owner.get("hostname") != socket.gethostname():
+            # Different host: we cannot verify liveness -> fail closed (held).
+            return True
+        return _pid_alive(pid)
+
+    def acquire_lock(self) -> dict[str, Any]:
+        """Acquire the exclusive supervisor lock, stealing a dead owner's.
+
+        Raises :class:`SupervisorLockError` when a live, foreign supervisor
+        already holds the lock.
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        path = self._lock_path()
+        payload = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "started_at": time.time(),
+        }
+        while True:
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                owner = read_json(path)
+                if self._lock_is_live(owner):
+                    raise SupervisorLockError(
+                        f"supervisor lock {path} held by live pid "
+                        f"{owner.get('pid') if owner else '?'}"
+                    )
+                # Dead / corrupt / our own stale owner -> steal and retry.
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            return payload
+
+    def release_lock(self) -> bool:
+        """Release the lock iff this process owns it.  Returns whether freed."""
+        owner = read_json(self._lock_path())
+        if owner is None or owner.get("pid") != os.getpid():
+            return False
+        try:
+            self._lock_path().unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+    @contextmanager
+    def hold_lock(self) -> Iterator[None]:
+        """Context manager wrapping :meth:`acquire_lock`/:meth:`release_lock`."""
+        self.acquire_lock()
+        try:
+            yield
+        finally:
+            self.release_lock()
