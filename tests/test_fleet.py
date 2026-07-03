@@ -25,9 +25,12 @@ from datasource_kit.fleet import (
     StopOutcome,
     StopResult,
     SupervisorLockError,
+    acquire_lock,
     honor_desired_state,
     liveness,
+    lock_is_live,
     read_json,
+    release_lock,
     spawn,
     spawn_process,
     stop,
@@ -568,6 +571,89 @@ def test_merge_heartbeat_generation_fencing(tmp_path: Path) -> None:
         "eli", {"generation": 1, "desired": "disabled", "generation_from_hb": 5}
     )
     assert state["desired"] == DESIRED_ENABLED
+
+
+# ---------------------------------------------------------------------------
+# Standalone supervisor-lock primitive
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_acquire_release_round_trips_payload(tmp_path: Path) -> None:
+    lock = tmp_path / "sub" / "supervisor.lock"  # parent created on demand
+    owner = acquire_lock(
+        lock, payload={"managed_by": "consumer", "schema_version": 2}
+    )
+    assert owner["pid"] == os.getpid()
+    assert owner["hostname"] == socket.gethostname()
+    assert owner["managed_by"] == "consumer"
+    assert owner["schema_version"] == 2
+    assert lock.exists()
+    on_disk = json.loads(lock.read_text(encoding="utf-8"))
+    assert on_disk["managed_by"] == "consumer"
+    assert on_disk["pid"] == os.getpid()
+    assert release_lock(lock) is True
+    assert not lock.exists()
+
+
+def test_standalone_payload_cannot_override_identity(tmp_path: Path) -> None:
+    lock = tmp_path / "supervisor.lock"
+    owner = acquire_lock(lock, payload={"pid": 1, "hostname": "elsewhere"})
+    assert owner["pid"] == os.getpid()
+    assert owner["hostname"] == socket.gethostname()
+    release_lock(lock)
+
+
+def test_standalone_defaults_started_at(tmp_path: Path) -> None:
+    lock = tmp_path / "supervisor.lock"
+    owner = acquire_lock(lock)
+    assert isinstance(owner["started_at"], float)
+    release_lock(lock)
+
+
+def test_standalone_raises_on_live_foreign_owner(tmp_path: Path) -> None:
+    lock = tmp_path / "supervisor.lock"
+    proc = subprocess.Popen(
+        [PYTHON, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        write_json_atomic(
+            lock,
+            {"pid": proc.pid, "hostname": socket.gethostname(), "started_at": 1.0},
+        )
+        with pytest.raises(SupervisorLockError):
+            acquire_lock(lock)
+    finally:
+        os.kill(proc.pid, signal.SIGKILL)
+
+
+def test_standalone_steals_dead_owner(tmp_path: Path) -> None:
+    lock = tmp_path / "supervisor.lock"
+    write_json_atomic(
+        lock,
+        {"pid": 999_999_999, "hostname": socket.gethostname(), "started_at": 1.0},
+    )
+    owner = acquire_lock(lock)  # dead owner -> stolen
+    assert owner["pid"] == os.getpid()
+    release_lock(lock)
+
+
+def test_standalone_release_foreign_lock_is_noop(tmp_path: Path) -> None:
+    lock = tmp_path / "supervisor.lock"
+    write_json_atomic(lock, {"pid": 111_111, "hostname": "x", "started_at": 1.0})
+    assert release_lock(lock) is False
+    assert lock.exists()  # a foreign owner's lock is never removed
+
+
+def test_lock_is_live_classifies_owners() -> None:
+    assert lock_is_live(None) is False
+    assert lock_is_live({"pid": os.getpid(), "hostname": socket.gethostname()}) is False
+    assert lock_is_live({"pid": 4242, "hostname": "some-other-host"}) is True
+    assert (
+        lock_is_live({"pid": 999_999_999, "hostname": socket.gethostname()}) is False
+    )
 
 
 # ---------------------------------------------------------------------------

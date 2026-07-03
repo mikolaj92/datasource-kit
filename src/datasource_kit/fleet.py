@@ -44,8 +44,11 @@ __all__ = [
     "SpawnAction",
     "StopAction",
     "SupervisorLockError",
+    "acquire_lock",
     "honor_desired_state",
+    "lock_is_live",
     "read_json",
+    "release_lock",
     "write_json_atomic",
     "DESIRED_ENABLED",
     "DESIRED_DISABLED",
@@ -465,6 +468,93 @@ def read_json(path: str | Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# ---------------------------------------------------------------------------
+# Standalone supervisor-lock primitive
+# ---------------------------------------------------------------------------
+#
+# A consumer that drives its own converge loop (rather than the
+# DesiredStateReconciler face) still needs the exact same exclusive
+# single-supervisor lock: create-exclusive, steal a dead or corrupt owner,
+# fail closed on a live foreign owner.  These module-level functions are that
+# primitive; :class:`DesiredStateReconciler` delegates to them.  A consumer may
+# pass its own ``payload`` (operator provenance, schema version, ...) which is
+# written into the lock file verbatim except for ``pid``/``hostname``, which
+# the primitive always stamps itself so the dead-owner-steal logic stays sound.
+
+
+def lock_is_live(owner: Mapping[str, Any] | None) -> bool:
+    """Whether an existing lock is held by a live, foreign owner.
+
+    ``None`` (corrupt/empty) and this process's own stale lock are reclaimable.
+    A lock owned by a different host cannot be liveness-probed here, so it fails
+    closed (treated as held).
+    """
+    if owner is None:
+        return False  # corrupt / empty -> stealable
+    pid = owner.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return False  # our own stale lock -> reclaimable
+    if owner.get("hostname") != socket.gethostname():
+        # Different host: we cannot verify liveness -> fail closed (held).
+        return True
+    return _pid_alive(pid)
+
+
+def acquire_lock(
+    path: str | Path, *, payload: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Acquire the exclusive lock at *path*, stealing a dead owner's.
+
+    *payload* is written into the lock body verbatim, except ``pid`` and
+    ``hostname``, which this function always stamps itself (a caller cannot
+    override them, so the dead-owner-steal logic stays sound); ``started_at``
+    defaults to the current time when the caller omits it.  Returns the written
+    body.  Raises :class:`SupervisorLockError` when a live, foreign owner
+    already holds the lock.
+    """
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    body = dict(payload or {})
+    body.setdefault("started_at", time.time())
+    body["pid"] = os.getpid()
+    body["hostname"] = socket.gethostname()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            owner = read_json(lock_path)
+            if lock_is_live(owner):
+                raise SupervisorLockError(
+                    f"supervisor lock {lock_path} held by live pid "
+                    f"{owner.get('pid') if owner else '?'}"
+                )
+            # Dead / corrupt / our own stale owner -> steal and retry.
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(body, handle)
+        return body
+
+
+def release_lock(path: str | Path) -> bool:
+    """Release the lock at *path* iff this process owns it.
+
+    Returns whether the lock was freed.
+    """
+    lock_path = Path(path)
+    owner = read_json(lock_path)
+    if owner is None or owner.get("pid") != os.getpid():
+        return False
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def honor_desired_state(state: Mapping[str, Any]) -> bool:
     """Default policy: run a unit iff its persisted desired state is enabled."""
     return state.get("desired") == DESIRED_ENABLED
@@ -699,15 +789,7 @@ class DesiredStateReconciler:
 
     def _lock_is_live(self, owner: dict[str, Any] | None) -> bool:
         """Whether an existing lock is held by a live, foreign owner."""
-        if owner is None:
-            return False  # corrupt / empty -> stealable
-        pid = owner.get("pid")
-        if not isinstance(pid, int) or pid == os.getpid():
-            return False  # our own stale lock -> reclaimable
-        if owner.get("hostname") != socket.gethostname():
-            # Different host: we cannot verify liveness -> fail closed (held).
-            return True
-        return _pid_alive(pid)
+        return lock_is_live(owner)
 
     def acquire_lock(self) -> dict[str, Any]:
         """Acquire the exclusive supervisor lock, stealing a dead owner's.
@@ -715,43 +797,11 @@ class DesiredStateReconciler:
         Raises :class:`SupervisorLockError` when a live, foreign supervisor
         already holds the lock.
         """
-        self._root.mkdir(parents=True, exist_ok=True)
-        path = self._lock_path()
-        payload = {
-            "pid": os.getpid(),
-            "hostname": socket.gethostname(),
-            "started_at": time.time(),
-        }
-        while True:
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            except FileExistsError:
-                owner = read_json(path)
-                if self._lock_is_live(owner):
-                    raise SupervisorLockError(
-                        f"supervisor lock {path} held by live pid "
-                        f"{owner.get('pid') if owner else '?'}"
-                    )
-                # Dead / corrupt / our own stale owner -> steal and retry.
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            return payload
+        return acquire_lock(self._lock_path())
 
     def release_lock(self) -> bool:
         """Release the lock iff this process owns it.  Returns whether freed."""
-        owner = read_json(self._lock_path())
-        if owner is None or owner.get("pid") != os.getpid():
-            return False
-        try:
-            self._lock_path().unlink()
-        except FileNotFoundError:
-            return False
-        return True
+        return release_lock(self._lock_path())
 
     @contextmanager
     def hold_lock(self) -> Iterator[None]:
