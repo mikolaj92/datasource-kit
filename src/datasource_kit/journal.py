@@ -6,6 +6,15 @@ generic bookkeeping shape (which dataset, when, how many records, status).
 
 The schema is intentionally identical to the one MSDS Portal datasources have
 used in production so existing databases remain compatible.
+
+Scope (decided once, see issue #27): this ``update_log`` is the refresh journal
+for *batch / non-runtime* consumers — a one-shot updater that owns a local
+SQLite store and wants a durable record of each refresh. A consumer that embeds
+a per-worker execution runtime (e.g. Fala) does NOT use this: its execution
+events live in the runtime's own journal and its durable facts live in its own
+database, so ``update_log`` would be a redundant third log. This is the batch
+alternative, kept deliberately alongside the fleet face — not a second journal
+for runtime-embedding consumers.
 """
 
 from __future__ import annotations

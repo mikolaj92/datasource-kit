@@ -20,7 +20,6 @@ datasource-kit = "datasource_kit.cli:main"
 fala = ["fala"]
 # YAML profile loading only; JSON profiles are the dep-free default.
 profiles = ["pyyaml>=6.0"]
-scheduler = ["apscheduler>=3.10"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

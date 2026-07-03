@@ -15,15 +15,9 @@ It supports three faces:
 Both ingest models register into one :class:`~datasource_kit.registry.Registry`
 and can be described declaratively with
 :class:`~datasource_kit.manifest.Manifest`.
-
-An optional :class:`~datasource_kit.scheduler.WorkerScheduler` (behind the
-``scheduler`` extra) can drive a poll loop; it is imported lazily so the core
-package stays dependency-free.
 """
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
 
 from .completeness import CompletenessReport, LayerCoverage, layers_from_names
 from .errors import (
@@ -88,9 +82,6 @@ from .retry import retry, retry_decorator
 from .runtime import run_ingest
 from .window import DayWindow, WindowIterator, split_range_into_days
 
-if TYPE_CHECKING:
-    from .scheduler import WorkerScheduler
-
 __all__ = [
     "ArtifactStore",
     "CompletenessReport",
@@ -140,7 +131,6 @@ __all__ = [
     "TokenBucket",
     "TransportError",
     "ValidationError",
-    "WorkerScheduler",
     "WindowIterator",
     "WorkerResult",
     "blocked_result",
@@ -165,12 +155,3 @@ __all__ = [
     "working_result",
     "write_json_atomic",
 ]
-
-
-def __getattr__(name: str) -> object:
-    # Lazy access so importing datasource_kit never requires apscheduler.
-    if name == "WorkerScheduler":
-        from .scheduler import WorkerScheduler
-
-        return WorkerScheduler
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

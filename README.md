@@ -152,7 +152,6 @@ Core has no third-party runtime dependencies. Optional integrations are lazy:
 
 ```bash
 pip install "datasource-kit[profiles]"   # YAML profile loading
-pip install "datasource-kit[scheduler]"  # APScheduler helper
 pip install "datasource-kit[fala]"       # Fala artifact adapter
 ```
 
