@@ -22,13 +22,16 @@ from datasource_kit.fleet import (
     ProcessSpec,
     ReconcileOutcome,
     SpawnResult,
+    StopOutcome,
     StopResult,
     SupervisorLockError,
     honor_desired_state,
     liveness,
     read_json,
     spawn,
+    spawn_process,
     stop,
+    stop_process,
     write_json_atomic,
 )
 
@@ -127,6 +130,58 @@ def test_spawn_default_unit_dir(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# spawn_process (layout-agnostic core)
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_process_long_running_alive() -> None:
+    """A long-running process is reported alive and writes no pid.json."""
+    result = spawn_process((PYTHON, "-c", "import time; time.sleep(30)"))
+    try:
+        assert isinstance(result, SpawnResult)
+        assert result.alive is True
+        assert result.pid > 0
+        assert result.started_at > 0
+        # No pid metadata is persisted anywhere by the layout-agnostic core.
+        os.kill(result.pid, 0)  # genuinely alive
+    finally:
+        os.kill(result.pid, signal.SIGKILL)
+
+
+def test_spawn_process_short_lived_dead() -> None:
+    """A process that exits in the probe window is reported not-alive."""
+    result = spawn_process(
+        (PYTHON, "-c", "import sys; sys.exit(0)"),
+        probe_window=1.5,
+        probe_sleep=0.05,
+    )
+    assert result.alive is False
+    assert result.pid > 0
+
+
+def test_spawn_process_env_and_cwd(tmp_path: Path) -> None:
+    """Environment, cwd, and a redirected stdout are forwarded to the child."""
+    workdir = tmp_path / "worker"
+    workdir.mkdir()
+    out_path = tmp_path / "out.log"
+    with out_path.open("w", encoding="utf-8") as out:
+        result = spawn_process(
+            (PYTHON, "-c",
+             "import os; print(os.environ.get('MY_VAR', 'nope')); "
+             "print(os.getcwd())"),
+            cwd=str(workdir),
+            env={**os.environ, "MY_VAR": "hello"},
+            stdout=out,
+            probe_window=1.5,
+            probe_sleep=0.05,
+        )
+    assert result.alive is False
+    captured = out_path.read_text(encoding="utf-8")
+    assert "hello" in captured
+    assert str(workdir) in captured
+
+
+# ---------------------------------------------------------------------------
 # Liveness
 # ---------------------------------------------------------------------------
 
@@ -212,6 +267,61 @@ def test_stop_no_pid_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# stop_process (layout-agnostic core)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_process_dead_pid() -> None:
+    """A dead pid yields signalled=False, killed=False and does no I/O."""
+    outcome = stop_process(999_999_999)
+    assert isinstance(outcome, StopOutcome)
+    assert outcome.pid == 999_999_999
+    assert outcome.signalled is False
+    assert outcome.killed is False
+
+
+def test_stop_process_graceful() -> None:
+    """A process honouring SIGTERM exits within the timeout, not killed."""
+    proc = subprocess.Popen(
+        [PYTHON, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    outcome = stop_process(proc.pid, timeout=5.0)
+    assert outcome.pid == proc.pid
+    assert outcome.signalled is True
+    assert outcome.killed is False
+
+
+def test_stop_process_escalates_to_sigkill() -> None:
+    """A process ignoring SIGTERM is escalated to SIGKILL."""
+    proc = subprocess.Popen(
+        [PYTHON, "-c",
+         "import time, signal;"
+         "signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # Let the child install its SIGTERM handler before we signal, otherwise a
+    # SIGTERM landing during interpreter startup terminates it by default and
+    # the escalation path never runs.
+    time.sleep(0.5)
+    outcome = stop_process(proc.pid, timeout=0.5)
+    assert outcome.pid == proc.pid
+    assert outcome.signalled is True
+    assert outcome.killed is True
+
+
+def test_stop_outcome_immutable() -> None:
+    o = StopOutcome(pid=7, signalled=True, killed=False)
+    assert o.pid == 7
+    with pytest.raises(AttributeError):
+        o.signalled = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # Dataclass immutability
 # ---------------------------------------------------------------------------
 
@@ -251,9 +361,12 @@ def test_fleet_exports_public_api() -> None:
     assert dk.ProcessSpec is ProcessSpec
     assert dk.SpawnResult is SpawnResult
     assert dk.StopResult is StopResult
+    assert dk.StopOutcome is StopOutcome
     assert dk.Liveness is Liveness
     assert dk.spawn is spawn
+    assert dk.spawn_process is spawn_process
     assert dk.stop is stop
+    assert dk.stop_process is stop_process
     assert dk.liveness is liveness
     assert dk.DesiredStateReconciler is DesiredStateReconciler
     assert dk.ReconcileOutcome is ReconcileOutcome

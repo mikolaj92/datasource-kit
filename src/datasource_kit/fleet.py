@@ -24,16 +24,19 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import IO, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 __all__ = [
     "Liveness",
     "ProcessSpec",
     "SpawnResult",
+    "StopOutcome",
     "StopResult",
     "liveness",
     "spawn",
+    "spawn_process",
     "stop",
+    "stop_process",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
     "ReconcileOutcome",
@@ -96,6 +99,20 @@ class StopResult:
     signalled: bool
     killed: bool
     cleaned: bool
+
+
+@dataclass(slots=True, frozen=True)
+class StopOutcome:
+    """Outcome of a :func:`stop_process` call.
+
+    Layout-agnostic sibling of :class:`StopResult`: it carries no ``cleaned``
+    flag because :func:`stop_process` performs no pid-file I/O -- pid metadata
+    is the caller's concern.
+    """
+
+    pid: int
+    signalled: bool
+    killed: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -183,47 +200,137 @@ def _pid_alive(pid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def spawn_process(
+    command: Sequence[str],
+    *,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+    stdout: int | IO[str] | None = None,
+    stderr: int | IO[str] | None = None,
+    probe_window: float = _PROBE_WINDOW,
+    probe_sleep: float = _PROBE_SLEEP,
+) -> SpawnResult:
+    """Spawn a detached child process and probe for immediate exit.
+
+    Layout-agnostic core of :func:`spawn`: it starts the process in its own
+    session (so a later :func:`stop_process` can signal the whole group), runs
+    the fail-closed immediate-exit probe, and returns the outcome. It writes
+    NO ``pid.json`` -- pid metadata and its on-disk layout are the caller's
+    concern.
+
+    Parameters
+    ----------
+    command:
+        Executable path and arguments (passed to ``subprocess.Popen``).
+    cwd:
+        Working directory for the child, or ``None`` to inherit.
+    env:
+        Environment for the child, or ``None`` to inherit the parent's.
+    stdout, stderr:
+        Destinations for the child's streams -- a file descriptor, an open
+        file object, or ``None`` (defaults to ``subprocess.DEVNULL``). Lets a
+        consumer redirect the child to its own log without the kit owning
+        log paths.
+    probe_window:
+        Total seconds to watch for an immediate exit.
+    probe_sleep:
+        Seconds to sleep between exit probes.
+
+    Returns
+    -------
+    A :class:`SpawnResult`. ``alive=False`` means the child exited within the
+    probe window (a failed spawn), never "running and then crashed".
+    """
+    child_env = dict(os.environ) if env is None else dict(env)
+    resolved_out: int | IO[str] = subprocess.DEVNULL if stdout is None else stdout
+    resolved_err: int | IO[str] = subprocess.DEVNULL if stderr is None else stderr
+
+    proc = subprocess.Popen(
+        list(command),
+        cwd=cwd,
+        env=child_env,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=resolved_out,
+        stderr=resolved_err,
+    )
+
+    started_at = time.time()
+    deadline = started_at + probe_window
+    alive = True
+    while time.time() < deadline:
+        ret = proc.poll()
+        if ret is not None:
+            alive = False
+            break
+        time.sleep(probe_sleep)
+
+    return SpawnResult(pid=proc.pid, started_at=started_at, alive=alive)
+
+
 def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None) -> SpawnResult:
     """Start a worker process described by *spec*.
 
     Writes ``pid.json`` metadata atomically to *unit_dir* (or
     ``spec.unit`` as a directory name when *unit_dir* is ``None``).
 
-    Performs a fail-closed immediate-exit probe: if the child dies
-    within the probe window the spawn is reported as failed
-    (``alive=False``), never as "running and then crashed".
+    Delegates the raw spawn + immediate-exit probe to :func:`spawn_process`
+    and only persists ``pid.json`` once the child survives the probe, so a
+    failed spawn (``alive=False``) leaves no stale pid metadata behind.
     """
     resolved = Path(unit_dir) if unit_dir is not None else Path(spec.unit)
     resolved.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os.environ) if spec.env is None else spec.env
+    result = spawn_process(spec.command, cwd=spec.cwd, env=spec.env)
 
-    proc = subprocess.Popen(
-        list(spec.command),
-        cwd=spec.cwd,
-        env=env,
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if result.alive:
+        _write_pid(resolved, result.pid, spec.command, spec.label)
 
-    started_at = time.time()
-    _write_pid(resolved, proc.pid, spec.command, spec.label)
+    return result
 
-    # Immediate-exit probe: poll the process for a short window.
-    # A process that dies within this window is reported as a failed spawn.
-    deadline = started_at + _PROBE_WINDOW
-    alive = True
+
+def stop_process(pid: int, *, timeout: float = _DEFAULT_TIMEOUT) -> StopOutcome:
+    """Stop a process group identified by *pid*, escalating SIGTERM -> SIGKILL.
+
+    Layout-agnostic core of :func:`stop`: it signals the process group, waits
+    up to *timeout* seconds for graceful exit, then escalates to SIGKILL. It
+    performs NO pid-file I/O -- reading the pid and cleaning up its on-disk
+    record are the caller's concern.
+
+    Returns a :class:`StopOutcome`:
+
+    - ``signalled=False, killed=False`` -- the pid was already dead, or it
+      vanished before SIGTERM could land (nothing to signal).
+    - ``signalled=True, killed=False`` -- SIGTERM was delivered and the
+      process exited within *timeout*.
+    - ``signalled=True, killed=True`` -- SIGTERM did not suffice, so SIGKILL
+      was delivered.
+    """
+    if not _pid_alive(pid):
+        return StopOutcome(pid=pid, signalled=False, killed=False)
+
+    try:
+        os.killpg(os.getpgid(pid), _STOP_SIGNAL)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Process already gone; nothing to signal.
+        return StopOutcome(pid=pid, signalled=False, killed=False)
+
+    # Wait for graceful exit.
+    deadline = time.time() + timeout
     while time.time() < deadline:
-        ret = proc.poll()
-        if ret is not None:
-            alive = False
-            _clean_pid(resolved)
-            break
-        time.sleep(_PROBE_SLEEP)
+        if not _pid_alive(pid):
+            return StopOutcome(pid=pid, signalled=True, killed=False)
+        time.sleep(0.1)
 
-    return SpawnResult(pid=proc.pid, started_at=started_at, alive=alive)
+    # Escalate to SIGKILL.
+    killed = False
+    try:
+        os.killpg(os.getpgid(pid), _KILL_SIGNAL)
+        killed = True
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    return StopOutcome(pid=pid, signalled=True, killed=killed)
 
 
 def stop(
@@ -233,10 +340,11 @@ def stop(
 ) -> StopResult:
     """Stop a supervised process identified by *unit_dir*.
 
-    Sends SIGTERM to the process group, then escalates to SIGKILL
-    after *timeout* seconds.  Stale *pid.json* (referencing a dead
-    or recycled pid) is cleaned up silently and reported via
-    ``cleaned=True``.
+    Reads the pid from *unit_dir*'s ``pid.json``, delegates the SIGTERM ->
+    SIGKILL escalation to :func:`stop_process`, then cleans up the pid file.
+    A stale ``pid.json`` (referencing a dead or recycled pid) is cleaned up
+    silently and reported via ``cleaned=True`` -- which mirrors the
+    "nothing was signalled" outcome.
     """
     data = _read_pid(unit_dir)
     if data is None:
@@ -244,37 +352,15 @@ def stop(
 
     pid = int(data["pid"])
 
-    # Stale-pid detection: if the pid is not alive, clean up and report.
-    if not _pid_alive(pid):
-        _clean_pid(unit_dir)
-        return StopResult(pid=pid, signalled=False, killed=False, cleaned=True)
-
-    killed = False
-
-    try:
-        os.killpg(os.getpgid(pid), _STOP_SIGNAL)
-    except (ProcessLookupError, PermissionError, OSError):
-        # Process already gone; nothing to signal.
-        _clean_pid(unit_dir)
-        return StopResult(pid=pid, signalled=False, killed=False, cleaned=True)
-
-    # Wait for graceful exit.
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _pid_alive(pid):
-            _clean_pid(unit_dir)
-            return StopResult(pid=pid, signalled=True, killed=False, cleaned=False)
-        time.sleep(0.1)
-
-    # Escalate to SIGKILL.
-    try:
-        os.killpg(os.getpgid(pid), _KILL_SIGNAL)
-        killed = True
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+    outcome = stop_process(pid, timeout=timeout)
 
     _clean_pid(unit_dir)
-    return StopResult(pid=pid, signalled=True, killed=killed, cleaned=False)
+    return StopResult(
+        pid=outcome.pid,
+        signalled=outcome.signalled,
+        killed=outcome.killed,
+        cleaned=not outcome.signalled,
+    )
 
 
 def liveness(unit_dir: str | Path) -> Liveness:
