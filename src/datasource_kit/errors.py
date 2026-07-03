@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "DatasourceKitError",
+    "InventoryError",
     "ProfileError",
     "ProviderError",
     "RegistryError",
@@ -28,6 +29,15 @@ class ValidationError(DatasourceKitError):
 
 class RegistryError(DatasourceKitError):
     """Raised when provider registration or lookup fails."""
+
+
+class InventoryError(DatasourceKitError):
+    """Raised when a fleet inventory cannot import or read a manifest module.
+
+    Fail-closed by design: a datasource whose manifest module is missing, fails
+    to import, or exposes no :class:`~datasource_kit.manifest.Manifest` is an
+    error, never a silently skipped unit.
+    """
 
 
 class ProviderError(DatasourceKitError):

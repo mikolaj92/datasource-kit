@@ -116,6 +116,31 @@ own environment, richer pid metadata) while the kit stays domain-blind. No
 health semantics beyond process liveness -- health interpretation stays in the
 consumer.
 
+### Fleet inventory
+
+A fleet supervisor needs to know which units exist and what they can do. Rather
+than static-parsing manifest source files, build the inventory by importing each
+datasource's manifest and reading the same `Manifest` object the runtime uses:
+
+```python
+from datasource_kit import fleet_inventory
+
+entries = fleet_inventory("myproj.datasources", ["eli", "saos", "clp"])
+autonomous = [e.name for e in entries if e.is_autonomous]
+```
+
+`fleet_inventory(package, names)` imports `package.<name>.manifest` (submodule
+and attribute name are overridable) and returns one `InventoryEntry` per name,
+carrying the loaded `Manifest` plus convenience flags (`is_autonomous`,
+`has_contract`, `execution_model`, `rate_limit`). It is fail-closed: a manifest
+module that is missing, fails to import, or exposes no `Manifest` raises
+`InventoryError` -- never a silently skipped unit, never an AST/filesystem guess.
+
+A `Manifest` states how a source runs with a first-class `execution`
+(`ExecutionModel(model, step_ref)`); `model="autonomous"` marks a long-lived
+worker and requires a `SourceContract`. The older boolean `supports_autonomous`
+is still honoured by `is_autonomous` but is superseded by `execution`.
+
 ## Install
 
 ```toml

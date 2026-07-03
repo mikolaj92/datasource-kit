@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from .completeness import CompletenessReport, LayerCoverage, layers_from_names
 from .errors import (
     DatasourceKitError,
+    InventoryError,
     ProfileError,
     ProviderError,
     RegistryError,
@@ -54,9 +55,10 @@ from .fleet import (
     stop,
     write_json_atomic,
 )
+from .inventory import InventoryEntry, fleet_inventory
 from .journal import ensure_update_log, now_utc, record_update
 from .ledger import DiscoveredItem, DiscoveryLedgerStore, Evidence, LedgerSummary
-from .manifest import Manifest, SourceContract
+from .manifest import EXECUTION_AUTONOMOUS, ExecutionModel, Manifest, SourceContract
 from .profile import SourceProfile, load_profile, validate_source
 from .protocols import (
     ArtifactStore,
@@ -101,14 +103,18 @@ __all__ = [
     "DesiredStateReconciler",
     "DiscoveredItem",
     "DiscoveryLedgerStore",
+    "EXECUTION_AUTONOMOUS",
     "Enumerator",
     "Evidence",
+    "ExecutionModel",
     "Fetcher",
     "GENERATION_ENV",
     "IngestReport",
     "InMemoryArtifactStore",
     "InMemoryStore",
     "IngestActor",
+    "InventoryEntry",
+    "InventoryError",
     "LayerCoverage",
     "LedgerSummary",
     "Liveness",
@@ -141,6 +147,7 @@ __all__ = [
     "builtin_registry",
     "completed_result",
     "ensure_update_log",
+    "fleet_inventory",
     "honor_desired_state",
     "layers_from_names",
     "liveness",
