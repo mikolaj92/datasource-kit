@@ -107,11 +107,13 @@ def test_router_observe_and_control_roundtrip(tmp_path: Path) -> None:
     paused = client.post("/workers/eli/pause")
     observed = client.get("/workers/eli")
 
-    # Then: the keep-alive state flips to held and the read-back agrees.
+    # Then: the keep-alive state flips to paused and the read-back agrees.
     assert paused.status_code == 200
-    assert paused.json()["desired"] == "held"
+    assert paused.json()["desired"] == "paused"
     assert observed.status_code == 200
-    assert observed.json()["desired"] == "held"
+    assert observed.json()["desired"] == "paused"
+    # The control plane in this fixture has no spawn action, so warm-pause only
+    # flips desired; nothing is spawned here and actual stays stopped.
     assert observed.json()["actual"] == "stopped"
 
     # When / Then: the remaining control verbs flip desired state as declared.

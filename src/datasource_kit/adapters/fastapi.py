@@ -51,7 +51,7 @@ def build_control_plane_router(control_plane: WorkerControlPlane) -> APIRouter:
 
     * ``GET  /workers`` -- observe the whole declared fleet (read-only)
     * ``GET  /workers/{unit}`` -- observe one unit (read-only)
-    * ``POST /workers/{unit}/pause`` -- warm-pause (keep-alive ``held``)
+    * ``POST /workers/{unit}/pause`` -- warm-pause (keep-alive ``paused``)
     * ``POST /workers/{unit}/resume`` -- resume (keep-alive ``enabled``)
     * ``POST /workers/{unit}/enable`` -- enable (keep-alive ``enabled``)
     * ``POST /workers/{unit}/disable`` -- disable (keep-alive ``disabled``)
