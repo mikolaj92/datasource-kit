@@ -34,7 +34,7 @@ from .errors import (
 from .fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
-    DESIRED_HELD,
+    DESIRED_PAUSED,
     GENERATION_ENV,
     DesiredStateReconciler,
     Liveness,
@@ -97,7 +97,7 @@ __all__ = [
     "Cursor",
     "DESIRED_DISABLED",
     "DESIRED_ENABLED",
-    "DESIRED_HELD",
+    "DESIRED_PAUSED",
     "DataSource",
     "DatasourceKitError",
     "DayWindow",

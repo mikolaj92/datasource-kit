@@ -52,7 +52,7 @@ __all__ = [
     "write_json_atomic",
     "DESIRED_ENABLED",
     "DESIRED_DISABLED",
-    "DESIRED_HELD",
+    "DESIRED_PAUSED",
     "GENERATION_ENV",
     # WorkerControlPlane face
     "WorkerControlPlane",
@@ -419,12 +419,16 @@ _STATE_SCHEMA_VERSION = 1
 #: Desired-state vocabulary persisted in ``state.json``.
 DESIRED_ENABLED = "enabled"
 DESIRED_DISABLED = "disabled"
-#: Keep-alive desired state: the reconciler neither spawns nor kills a held
-#: unit -- a running process stays running (warm-parked by the consumer's own
-#: drive loop), a stopped one stays stopped.  Domain-blind: what "held" means
-#: for the loop is the consumer's decision; the kit only declines to change
-#: process topology.
-DESIRED_HELD = "held"
+#: Warm keep-alive desired state.  Like :data:`DESIRED_ENABLED`, the reconciler
+#: wants a paused unit's process *running* -- it spawns one that is down
+#: (reboot-warm: a paused unit comes back up after a supervisor restart) and
+#: never kills one that is up (only :data:`DESIRED_DISABLED` stops a process).
+#: The difference from ``enabled`` is purely the carried label: the consumer's
+#: own drive loop reads ``paused`` and idles (holds no lease, acquires nothing),
+#: keeping the process warm for instant resume.  Domain-blind: the kit only
+#: keeps the process alive and carries the opaque label; what "paused" means for
+#: the loop is the consumer's decision.
+DESIRED_PAUSED = "paused"
 
 #: Environment variable the default spawn action injects into each child so a
 #: worker can stamp its heartbeats with the generation it was spawned under.
@@ -464,8 +468,8 @@ class ReconcileOutcome:
     """Result of converging a single unit toward its desired state."""
 
     unit: str
-    action: str  # "spawned", "stopped", "held", or "noop"
-    desired: str  # "enabled", "disabled", or "held"
+    action: str  # "spawned", "stopped", or "noop"
+    desired: str  # "enabled", "disabled", or "paused"
     actual: str  # "running" or "stopped"
     generation: int
     pid: int | None
@@ -584,8 +588,14 @@ def release_lock(path: str | Path) -> bool:
 
 
 def honor_desired_state(state: Mapping[str, Any]) -> bool:
-    """Default policy: run a unit iff its persisted desired state is enabled."""
-    return state.get("desired") == DESIRED_ENABLED
+    """Default policy: run a unit iff its desired state is enabled or paused.
+
+    ``paused`` is a *warm* keep-alive (:data:`DESIRED_PAUSED`): its process
+    should be running-but-idle, so the policy wants it running exactly like
+    ``enabled``.  The two differ only in the label the consumer's drive loop
+    reads; only :data:`DESIRED_DISABLED` keeps a unit stopped.
+    """
+    return state.get("desired") in (DESIRED_ENABLED, DESIRED_PAUSED)
 
 
 def _default_spawn_action(
@@ -671,11 +681,11 @@ class DesiredStateReconciler:
         write_json_atomic(self.state_file(str(state["unit"])), state)
 
     def set_desired(self, unit: str, desired: str) -> dict[str, Any]:
-        """Persist a unit's desired state (``enabled``/``disabled``/``held``)."""
-        if desired not in (DESIRED_ENABLED, DESIRED_DISABLED, DESIRED_HELD):
+        """Persist a unit's desired state (``enabled``/``disabled``/``paused``)."""
+        if desired not in (DESIRED_ENABLED, DESIRED_DISABLED, DESIRED_PAUSED):
             raise ValueError(
                 f"desired must be one of {DESIRED_ENABLED!r}, "
-                f"{DESIRED_DISABLED!r}, {DESIRED_HELD!r}, got {desired!r}"
+                f"{DESIRED_DISABLED!r}, {DESIRED_PAUSED!r}, got {desired!r}"
             )
         state = self.load_state(unit)
         state["desired"] = desired
@@ -688,9 +698,14 @@ class DesiredStateReconciler:
     def disable(self, unit: str) -> dict[str, Any]:
         return self.set_desired(unit, DESIRED_DISABLED)
 
-    def hold(self, unit: str) -> dict[str, Any]:
-        """Keep-alive: leave a running process running, never force-restart."""
-        return self.set_desired(unit, DESIRED_HELD)
+    def pause(self, unit: str) -> dict[str, Any]:
+        """Warm keep-alive: keep the process running-but-idle (reboot-warm).
+
+        The reconciler wants a paused unit running just like ``enabled`` (it
+        spawns one that is down, never kills one that is up); the consumer's
+        drive loop reads ``paused`` and idles.
+        """
+        return self.set_desired(unit, DESIRED_PAUSED)
 
     def merge_heartbeat(
         self, unit: str, heartbeat: Mapping[str, Any]
@@ -734,32 +749,17 @@ class DesiredStateReconciler:
     def reconcile_unit(
         self, spec: ProcessSpec, policy: ReconcilePolicy
     ) -> ReconcileOutcome:
-        """Converge a single unit toward the desired state (no lock)."""
+        """Converge a single unit toward the desired state (no lock).
+
+        A ``paused`` unit is a *warm* keep-alive: the default policy wants it
+        running (:func:`honor_desired_state`), so it flows through the normal
+        want-running path below -- spawned if down (reboot-warm), a noop if
+        already up (never killed by its desired state).  The "idle while
+        running" half is the consumer's drive loop reading the ``paused`` label;
+        the reconciler only keeps the process alive.
+        """
         unit = spec.unit
         state = self.load_state(unit)
-
-        if state["desired"] == DESIRED_HELD:
-            # Keep-alive: never spawn, never kill.  A running process stays
-            # running (warm-parked by the consumer's own drive loop); a
-            # stopped one stays stopped.  The kit only declines to change
-            # process topology -- what "held" means for the drive loop is the
-            # consumer's decision.  Short-circuit before the policy so a held
-            # unit is inert regardless of what the policy would return, and
-            # never invoke ``policy`` with a mutated ``state`` -- the non-held
-            # path below keeps its HEAD input contract untouched.
-            actual = self.observe_actual(unit)
-            state["actual"] = actual
-            self._save_state(state)
-            pid = state.get("pid")
-            return ReconcileOutcome(
-                unit=unit,
-                action="held",
-                desired=DESIRED_HELD,
-                actual=actual,
-                generation=int(state["generation"]),
-                pid=pid if (isinstance(pid, int) and actual == "running") else None,
-                alive=actual == "running",
-            )
 
         want_running = policy(state)
         actual = self.observe_actual(unit)
@@ -899,8 +899,9 @@ class WorkerControlPlane:
     Wraps a :class:`DesiredStateReconciler` and a fixed tuple of unit ids to
     give a consumer -- or an adapter such as the optional FastAPI router -- one
     place to read fleet state and flip desired states.  ``pause`` writes the
-    keep-alive :data:`DESIRED_HELD` state (warm pause: the reconciler leaves a
-    running process alive); ``resume`` writes :data:`DESIRED_ENABLED`.
+    warm keep-alive :data:`DESIRED_PAUSED` state (the reconciler keeps the
+    process running -- spawning it if down, never killing it -- while the
+    consumer's drive loop idles); ``resume`` writes :data:`DESIRED_ENABLED`.
 
     It stays domain-blind and health-blind: unit ids only, heartbeat passed
     through opaque.  Unit-scoped calls fail closed with :class:`KeyError` for a
@@ -963,9 +964,9 @@ class WorkerControlPlane:
         return [self.observe_unit(unit) for unit in self._units]
 
     def pause(self, unit: str) -> dict[str, Any]:
-        """Warm-pause a unit: write the keep-alive :data:`DESIRED_HELD` state."""
+        """Warm-pause a unit: write the keep-alive :data:`DESIRED_PAUSED` state."""
         self._require(unit)
-        return self._reconciler.hold(unit)
+        return self._reconciler.pause(unit)
 
     def resume(self, unit: str) -> dict[str, Any]:
         """Resume a unit: write :data:`DESIRED_ENABLED`."""

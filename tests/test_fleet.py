@@ -16,7 +16,7 @@ import pytest
 from datasource_kit.fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
-    DESIRED_HELD,
+    DESIRED_PAUSED,
     GENERATION_ENV,
     DesiredStateReconciler,
     Liveness,
@@ -397,7 +397,7 @@ def test_fleet_exports_public_api() -> None:
     assert dk.honor_desired_state is honor_desired_state
     assert dk.write_json_atomic is write_json_atomic
     assert dk.read_json is read_json
-    assert dk.DESIRED_HELD is DESIRED_HELD
+    assert dk.DESIRED_PAUSED is DESIRED_PAUSED
     assert dk.WorkerControlPlane is WorkerControlPlane
     assert dk.UnitObservation is UnitObservation
 
@@ -477,12 +477,14 @@ def test_default_state_and_set_desired(tmp_path: Path) -> None:
 def test_set_desired_rejects_bad_value(tmp_path: Path) -> None:
     rec = DesiredStateReconciler(tmp_path)
     with pytest.raises(ValueError):
-        rec.set_desired("eli", "paused")
+        rec.set_desired("eli", "frozen")
 
 
 def test_honor_desired_state_policy() -> None:
     assert honor_desired_state({"desired": DESIRED_ENABLED}) is True
     assert honor_desired_state({"desired": DESIRED_DISABLED}) is False
+    # Warm-paused wants the process running (reboot-warm), just like enabled.
+    assert honor_desired_state({"desired": DESIRED_PAUSED}) is True
     assert honor_desired_state({}) is False
 
 
@@ -807,21 +809,21 @@ def test_serve_runs_until_stop_condition(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# DesiredStateReconciler: held (keep-alive)
+# DesiredStateReconciler: paused (warm keep-alive)
 # ---------------------------------------------------------------------------
 
 
-def test_set_desired_accepts_held(tmp_path: Path) -> None:
+def test_set_desired_accepts_paused(tmp_path: Path) -> None:
     rec = DesiredStateReconciler(tmp_path)
-    rec.hold("eli")
-    assert rec.load_state("eli")["desired"] == DESIRED_HELD
+    rec.pause("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_PAUSED
     # The literal is accepted through set_desired too.
-    rec.set_desired("saos", DESIRED_HELD)
-    assert rec.load_state("saos")["desired"] == DESIRED_HELD
+    rec.set_desired("saos", DESIRED_PAUSED)
+    assert rec.load_state("saos")["desired"] == DESIRED_PAUSED
 
 
-def test_hold_leaves_running_process_alive(tmp_path: Path) -> None:
-    """A held unit that is running is neither stopped nor re-spawned."""
+def test_pause_leaves_running_process_alive(tmp_path: Path) -> None:
+    """A paused unit that is running is neither stopped nor re-spawned."""
     spawn_calls, spawn_action = _recording_spawn()
     stop_calls, stop_action = _recording_stop()
     rec = DesiredStateReconciler(
@@ -837,11 +839,12 @@ def test_hold_leaves_running_process_alive(tmp_path: Path) -> None:
     assert up.action == "spawned"
     assert spawn_calls == [("eli", 1)]
 
-    # Now hold it and reconcile again: warm keep-alive.
-    rec.hold("eli")
+    # Now pause it and reconcile again: warm keep-alive -- an up process is
+    # left resident (noop), exactly like enabled.  Only the label differs.
+    rec.pause("eli")
     outcome = rec.reconcile_unit(spec, honor_desired_state)
-    assert outcome.action == "held"
-    assert outcome.desired == DESIRED_HELD
+    assert outcome.action == "noop"
+    assert outcome.desired == DESIRED_PAUSED
     assert outcome.actual == "running"
     assert outcome.alive is True
     assert outcome.pid == os.getpid()
@@ -850,26 +853,30 @@ def test_hold_leaves_running_process_alive(tmp_path: Path) -> None:
     assert stop_calls == []
 
 
-def test_hold_does_not_spawn_stopped_unit(tmp_path: Path) -> None:
-    """A held unit that is down stays down -- no force-restart."""
+def test_pause_respawns_stopped_unit(tmp_path: Path) -> None:
+    """A paused unit that is down is re-spawned into an idle park (reboot-warm).
+
+    This is the crux of warm-pause: after a supervisor/host restart a paused
+    unit's process comes back *up* (want_running like enabled), and the
+    consumer's own drive loop reads the ``paused`` label and self-idles.  The
+    kit keeps the process warm; it does not know or care what idling means.
+    """
     spawn_calls, spawn_action = _recording_spawn()
     rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
     spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
 
-    rec.hold("eli")
+    rec.pause("eli")
     outcome = rec.reconcile_unit(spec, honor_desired_state)
-    assert outcome.action == "held"
-    assert outcome.actual == "stopped"
-    assert outcome.alive is False
-    assert outcome.pid is None
-    assert spawn_calls == []
+    assert outcome.action == "spawned"
+    assert outcome.desired == DESIRED_PAUSED
+    assert spawn_calls == [("eli", 1)]
 
 
-def test_hold_is_still_rejected_as_paused(tmp_path: Path) -> None:
-    """Adding 'held' does not widen the vocabulary to arbitrary values."""
+def test_set_desired_vocabulary_stays_narrow(tmp_path: Path) -> None:
+    """Adding 'paused' does not widen the vocabulary to arbitrary values."""
     rec = DesiredStateReconciler(tmp_path)
     with pytest.raises(ValueError):
-        rec.set_desired("eli", "paused")
+        rec.set_desired("eli", "held")
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +889,7 @@ def test_control_plane_pause_resume_writes_desired(tmp_path: Path) -> None:
     cp = WorkerControlPlane(rec, ["eli", "saos"])
 
     cp.pause("eli")
-    assert rec.load_state("eli")["desired"] == DESIRED_HELD
+    assert rec.load_state("eli")["desired"] == DESIRED_PAUSED
     cp.resume("eli")
     assert rec.load_state("eli")["desired"] == DESIRED_ENABLED
     cp.disable("eli")
@@ -895,13 +902,13 @@ def test_control_plane_observe_whole_fleet(tmp_path: Path) -> None:
     rec = DesiredStateReconciler(tmp_path)
     cp = WorkerControlPlane(rec, ["eli", "saos"])
     rec.enable("eli")
-    rec.hold("saos")
+    rec.pause("saos")
 
     snap = cp.observe()
     assert [u.unit for u in snap] == ["eli", "saos"]  # declared order
     by_unit = {u.unit: u for u in snap}
     assert by_unit["eli"].desired == DESIRED_ENABLED
-    assert by_unit["saos"].desired == DESIRED_HELD
+    assert by_unit["saos"].desired == DESIRED_PAUSED
     # No live process -> stopped, pid None, empty (opaque) heartbeat.
     assert by_unit["eli"].actual == "stopped"
     assert by_unit["eli"].pid is None
