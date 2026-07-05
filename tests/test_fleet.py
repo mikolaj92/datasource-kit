@@ -228,6 +228,24 @@ def test_liveness_no_pid_file(tmp_path: Path) -> None:
         liveness(tmp_path / "nonexistent")
 
 
+def test_liveness_pidless_pid_json_is_stale(tmp_path: Path) -> None:
+    """A valid-JSON pid.json missing the 'pid' key is stale, not a crash."""
+    unit_dir = tmp_path / "pidless"
+    _write_payload(unit_dir / "pid.json", {"label": "pidless", "started_at": 0.0})
+
+    result = liveness(unit_dir)
+    assert result.state == "stale"
+
+
+def test_liveness_non_integer_pid_is_stale(tmp_path: Path) -> None:
+    """A pid.json whose 'pid' is not an integer is stale, not a crash."""
+    unit_dir = tmp_path / "badpid"
+    _write_payload(unit_dir / "pid.json", {"pid": "not-a-number"})
+
+    result = liveness(unit_dir)
+    assert result.state == "stale"
+
+
 # ---------------------------------------------------------------------------
 # Stop
 # ---------------------------------------------------------------------------
