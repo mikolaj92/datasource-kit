@@ -52,7 +52,11 @@ __all__ = [
     "write_json_atomic",
     "DESIRED_ENABLED",
     "DESIRED_DISABLED",
+    "DESIRED_HELD",
     "GENERATION_ENV",
+    # WorkerControlPlane face
+    "WorkerControlPlane",
+    "UnitObservation",
 ]
 
 # ---------------------------------------------------------------------------
@@ -405,11 +409,25 @@ _STATE_SCHEMA_VERSION = 1
 #: Desired-state vocabulary persisted in ``state.json``.
 DESIRED_ENABLED = "enabled"
 DESIRED_DISABLED = "disabled"
+#: Keep-alive desired state: the reconciler neither spawns nor kills a held
+#: unit -- a running process stays running (warm-parked by the consumer's own
+#: drive loop), a stopped one stays stopped.  Domain-blind: what "held" means
+#: for the loop is the consumer's decision; the kit only declines to change
+#: process topology.
+DESIRED_HELD = "held"
 
 #: Environment variable the default spawn action injects into each child so a
 #: worker can stamp its heartbeats with the generation it was spawned under.
 #: Consumers that inject their own spawn action pick their own variable name.
 GENERATION_ENV = "DATASOURCE_KIT_GENERATION"
+
+#: State keys the reconciler owns.  ``merge_heartbeat`` refuses to let a worker
+#: heartbeat overwrite any of these, and :class:`WorkerControlPlane` treats
+#: every *other* key a worker merged into its state as opaque heartbeat payload
+#: -- the kit never interprets it, staying health-blind.
+_CORE_STATE_KEYS = frozenset(
+    {"schema_version", "unit", "desired", "actual", "generation", "pid"}
+)
 
 
 class SupervisorLockError(RuntimeError):
@@ -436,8 +454,8 @@ class ReconcileOutcome:
     """Result of converging a single unit toward its desired state."""
 
     unit: str
-    action: str  # "spawned", "stopped", or "noop"
-    desired: str  # "enabled" or "disabled"
+    action: str  # "spawned", "stopped", "held", or "noop"
+    desired: str  # "enabled", "disabled", or "held"
     actual: str  # "running" or "stopped"
     generation: int
     pid: int | None
@@ -643,11 +661,11 @@ class DesiredStateReconciler:
         write_json_atomic(self.state_file(str(state["unit"])), state)
 
     def set_desired(self, unit: str, desired: str) -> dict[str, Any]:
-        """Persist a unit's desired state (``enabled`` or ``disabled``)."""
-        if desired not in (DESIRED_ENABLED, DESIRED_DISABLED):
+        """Persist a unit's desired state (``enabled``/``disabled``/``held``)."""
+        if desired not in (DESIRED_ENABLED, DESIRED_DISABLED, DESIRED_HELD):
             raise ValueError(
-                f"desired must be {DESIRED_ENABLED!r} or {DESIRED_DISABLED!r}, "
-                f"got {desired!r}"
+                f"desired must be one of {DESIRED_ENABLED!r}, "
+                f"{DESIRED_DISABLED!r}, {DESIRED_HELD!r}, got {desired!r}"
             )
         state = self.load_state(unit)
         state["desired"] = desired
@@ -660,6 +678,10 @@ class DesiredStateReconciler:
     def disable(self, unit: str) -> dict[str, Any]:
         return self.set_desired(unit, DESIRED_DISABLED)
 
+    def hold(self, unit: str) -> dict[str, Any]:
+        """Keep-alive: leave a running process running, never force-restart."""
+        return self.set_desired(unit, DESIRED_HELD)
+
     def merge_heartbeat(
         self, unit: str, heartbeat: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -667,8 +689,11 @@ class DesiredStateReconciler:
 
         A heartbeat is accepted only when its ``generation`` matches the
         current one, so a zombie from a previous generation can never overwrite
-        current state.  ``unit``, ``desired``, and ``generation`` are owned by
-        the reconciler and are never taken from a heartbeat.
+        current state.  The reconciler-owned core keys (:data:`_CORE_STATE_KEYS`
+        -- ``schema_version``, ``unit``, ``desired``, ``actual``, ``generation``,
+        ``pid``) are never taken from a heartbeat: a worker cannot forge its own
+        liveness (``actual``/``pid``) or reassign its desired state.  Every other
+        key is stored verbatim as opaque heartbeat payload.
         """
         state = self.load_state(unit)
         reported = heartbeat.get("generation")
@@ -676,7 +701,7 @@ class DesiredStateReconciler:
             return state
         merged = dict(state)
         for key, value in heartbeat.items():
-            if key in ("unit", "desired", "generation", "schema_version"):
+            if key in _CORE_STATE_KEYS:
                 continue
             merged[key] = value
         self._save_state(merged)
@@ -702,10 +727,33 @@ class DesiredStateReconciler:
         """Converge a single unit toward the desired state (no lock)."""
         unit = spec.unit
         state = self.load_state(unit)
+
+        if state["desired"] == DESIRED_HELD:
+            # Keep-alive: never spawn, never kill.  A running process stays
+            # running (warm-parked by the consumer's own drive loop); a
+            # stopped one stays stopped.  The kit only declines to change
+            # process topology -- what "held" means for the drive loop is the
+            # consumer's decision.  Short-circuit before the policy so a held
+            # unit is inert regardless of what the policy would return, and
+            # never invoke ``policy`` with a mutated ``state`` -- the non-held
+            # path below keeps its HEAD input contract untouched.
+            actual = self.observe_actual(unit)
+            state["actual"] = actual
+            self._save_state(state)
+            pid = state.get("pid")
+            return ReconcileOutcome(
+                unit=unit,
+                action="held",
+                desired=DESIRED_HELD,
+                actual=actual,
+                generation=int(state["generation"]),
+                pid=pid if (isinstance(pid, int) and actual == "running") else None,
+                alive=actual == "running",
+            )
+
         want_running = policy(state)
         actual = self.observe_actual(unit)
         state["actual"] = actual
-
         if want_running and actual != "running":
             generation = int(state["generation"]) + 1
             result = self._spawn(spec, generation, self.unit_dir(unit))
@@ -811,3 +859,115 @@ class DesiredStateReconciler:
             yield
         finally:
             self.release_lock()
+
+
+# ---------------------------------------------------------------------------
+# WorkerControlPlane -- aggregate observe / pause / resume over a fleet
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class UnitObservation:
+    """A single unit's control-plane snapshot.
+
+    ``heartbeat`` carries every non-core key a worker merged into its state as
+    an opaque payload: the kit never interprets it, keeping the control plane
+    health-blind.  ``pid`` is reported only while the unit is observed running.
+    """
+
+    unit: str
+    desired: str
+    actual: str
+    generation: int
+    pid: int | None
+    heartbeat: Mapping[str, Any]
+
+
+class WorkerControlPlane:
+    """Aggregate observe / pause / resume surface over a declared fleet.
+
+    Wraps a :class:`DesiredStateReconciler` and a fixed tuple of unit ids to
+    give a consumer -- or an adapter such as the optional FastAPI router -- one
+    place to read fleet state and flip desired states.  ``pause`` writes the
+    keep-alive :data:`DESIRED_HELD` state (warm pause: the reconciler leaves a
+    running process alive); ``resume`` writes :data:`DESIRED_ENABLED`.
+
+    It stays domain-blind and health-blind: unit ids only, heartbeat passed
+    through opaque.  Unit-scoped calls fail closed with :class:`KeyError` for a
+    unit outside the declared fleet.
+    """
+
+    def __init__(
+        self, reconciler: DesiredStateReconciler, units: Iterable[str]
+    ) -> None:
+        self._reconciler = reconciler
+        self._units = tuple(units)
+
+    @property
+    def units(self) -> tuple[str, ...]:
+        return self._units
+
+    def _require(self, unit: str) -> None:
+        if unit not in self._units:
+            raise KeyError(unit)
+
+    def observe_unit(self, unit: str) -> UnitObservation:
+        """Snapshot a single declared unit (fails closed on unknown units).
+
+        This is a **read-only** view: it classifies liveness straight from
+        ``pid.json`` and never cleans a stale pid file.  Pruning stale metadata
+        is the supervisor's job, done under the supervisor lock during reconcile
+        -- an out-of-process observer (e.g. the FastAPI adapter) must not race
+        it by unlinking a pid file the supervisor may have just refreshed.  The
+        live pid from ``pid.json`` is authoritative for the view, not the
+        possibly-lagging ``state["pid"]`` record.
+        """
+        self._require(unit)
+        state = self._reconciler.load_state(unit)
+        try:
+            live = liveness(self._reconciler.unit_dir(unit))
+        except FileNotFoundError:
+            live = None
+        if live is not None and live.state == "running":
+            actual, pid = "running", live.pid
+        else:
+            # No pid file, or a stale one (process gone): report stopped
+            # without touching disk.
+            actual, pid = "stopped", None
+        heartbeat = {
+            key: value
+            for key, value in state.items()
+            if key not in _CORE_STATE_KEYS
+        }
+        return UnitObservation(
+            unit=unit,
+            desired=str(state["desired"]),
+            actual=actual,
+            generation=int(state["generation"]),
+            pid=pid,
+            heartbeat=heartbeat,
+        )
+
+    def observe(self) -> list[UnitObservation]:
+        """Whole-fleet snapshot in declared order."""
+        return [self.observe_unit(unit) for unit in self._units]
+
+    def pause(self, unit: str) -> dict[str, Any]:
+        """Warm-pause a unit: write the keep-alive :data:`DESIRED_HELD` state."""
+        self._require(unit)
+        return self._reconciler.hold(unit)
+
+    def resume(self, unit: str) -> dict[str, Any]:
+        """Resume a unit: write :data:`DESIRED_ENABLED`."""
+        self._require(unit)
+        return self._reconciler.enable(unit)
+
+    def enable(self, unit: str) -> dict[str, Any]:
+        """Enable a unit (alias of :meth:`resume`, for vocabulary parity)."""
+        self._require(unit)
+        return self._reconciler.enable(unit)
+
+    def disable(self, unit: str) -> dict[str, Any]:
+        """Disable a unit: write :data:`DESIRED_DISABLED` (stop on reconcile)."""
+        self._require(unit)
+        return self._reconciler.disable(unit)
