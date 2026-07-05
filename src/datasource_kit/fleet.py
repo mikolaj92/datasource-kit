@@ -374,14 +374,24 @@ def liveness(unit_dir: str | Path) -> Liveness:
     """Check the liveness of a supervised process by *unit_dir*.
 
     Returns ``"running"``, ``"stopped"``, or ``"stale"``.
-    ``"stale"`` means *pid.json* exists but the referenced pid is not
-    alive (or the pid file is corrupt) -- the consumer should clean up.
+    ``"stale"`` means *pid.json* exists but the referenced pid is not alive,
+    or the file is corrupt (a valid JSON object whose ``pid`` is missing or
+    non-integer) -- either way the consumer should clean it up.  Raises
+    :class:`FileNotFoundError` only when *pid.json* is absent, so an
+    out-of-process observer can classify any surviving pid file without
+    crashing on a torn or hand-edited one.
     """
     data = _read_pid(unit_dir)
     if data is None:
         raise FileNotFoundError(f"no pid.json in {unit_dir}")
 
-    pid = int(data["pid"])
+    try:
+        pid = int(data["pid"])
+    except (KeyError, TypeError, ValueError):
+        # Corrupt pid.json (missing or non-integer ``pid``): treat as stale
+        # per the contract above.  There is no usable pid, so report 0 -- the
+        # stale branch is never signalled, so the sentinel is never used.
+        return Liveness(pid=0, state="stale")
     if _pid_alive(pid):
         return Liveness(pid=pid, state="running")
 
