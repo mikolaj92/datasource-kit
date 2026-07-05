@@ -186,20 +186,56 @@ def _clean_pid(unit_dir: str | Path) -> bool:
         return True
 
 
+def _pid_is_zombie(pid: int) -> bool:
+    """Return ``True`` if *pid* is a zombie (exited but not yet reaped).
+
+    A process that has exited but whose parent has not ``wait()``-ed on it
+    still occupies its PID slot, so ``os.kill(pid, 0)`` keeps succeeding even
+    though the process is dead. When the supervisor is the worker's own parent
+    (the reconciler spawns and never reaps), a crashed worker becomes exactly
+    such a zombie -- and without this check it would read "running" forever and
+    never be respawned. Detected via POSIX ``ps -o stat=``: the state column's
+    zombie marker is ``Z``. Any inability to inspect (no ``ps``, timeout, race)
+    is reported as "not a zombie", so a transient probe failure never masks a
+    genuinely live process.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "Z" in result.stdout.strip()
+
+
 def _pid_alive(pid: int) -> bool:
-    """Return ``True`` if *pid* refers to a live process owned by us."""
+    """Return ``True`` if *pid* refers to a live, non-zombie process.
+
+    ``os.kill(pid, 0)`` succeeding only proves the PID slot is occupied; a
+    zombie occupies its slot too. Excluding zombies is what lets the reconciler
+    respawn a crashed worker whose parent is the supervisor itself (see
+    :func:`_pid_is_zombie`).
+    """
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Process exists but owned by another user -- treat as alive
-        # (the consumer's *pid.json* is our provenance, not a correctness
-        # guarantee about ownership).
-        return True
+        # Process exists but is owned by another user (a recycled PID slot, or
+        # a worker that dropped privileges). ``os.kill`` cannot signal it, but
+        # ``ps`` can still read its state, so a foreign zombie is excluded the
+        # same way as one of our own. The consumer's *pid.json* is provenance,
+        # not an ownership guarantee.
+        return not _pid_is_zombie(pid)
     except OSError:
         return False
-    return True
+    return not _pid_is_zombie(pid)
 
 
 # ---------------------------------------------------------------------------
