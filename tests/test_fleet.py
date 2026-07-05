@@ -16,6 +16,7 @@ import pytest
 from datasource_kit.fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
+    DESIRED_HELD,
     GENERATION_ENV,
     DesiredStateReconciler,
     Liveness,
@@ -25,6 +26,8 @@ from datasource_kit.fleet import (
     StopOutcome,
     StopResult,
     SupervisorLockError,
+    UnitObservation,
+    WorkerControlPlane,
     acquire_lock,
     honor_desired_state,
     liveness,
@@ -376,6 +379,9 @@ def test_fleet_exports_public_api() -> None:
     assert dk.honor_desired_state is honor_desired_state
     assert dk.write_json_atomic is write_json_atomic
     assert dk.read_json is read_json
+    assert dk.DESIRED_HELD is DESIRED_HELD
+    assert dk.WorkerControlPlane is WorkerControlPlane
+    assert dk.UnitObservation is UnitObservation
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +579,40 @@ def test_merge_heartbeat_generation_fencing(tmp_path: Path) -> None:
     assert state["desired"] == DESIRED_ENABLED
 
 
+def test_merge_heartbeat_refuses_all_core_keys(tmp_path: Path) -> None:
+    """A worker cannot forge its own liveness (actual/pid) via a heartbeat.
+
+    ``actual`` and ``pid`` are reconciler-owned observations; if a heartbeat
+    could overwrite them, a parked worker could lie itself into 'running' and
+    the control-plane view would trust the lie.  Only non-core keys are stored.
+    """
+    rec = DesiredStateReconciler(tmp_path)
+    rec.enable("eli")  # desired=enabled, generation 0, actual="unknown", pid=None
+    before = rec.load_state("eli")
+
+    merged = rec.merge_heartbeat(
+        "eli",
+        {
+            "generation": 0,  # matches -> heartbeat accepted
+            "actual": "running",  # forged liveness
+            "pid": 4242,  # forged pid
+            "desired": DESIRED_DISABLED,  # forged desired-state flip
+            "schema_version": 99,  # forged schema
+            "unit": "not-eli",  # forged identity
+            "worker_status": "parked",  # the only non-core key -> stored
+        },
+    )
+    # Every core key keeps its reconciler-owned value.
+    assert merged["actual"] == before["actual"]
+    assert merged["pid"] == before["pid"]
+    assert merged["desired"] == DESIRED_ENABLED
+    assert merged["schema_version"] == before["schema_version"]
+    assert merged["unit"] == "eli"
+    # Only the non-core key lands, and disk agrees with the returned merge.
+    assert merged["worker_status"] == "parked"
+    assert rec.load_state("eli") == merged
+
+
 # ---------------------------------------------------------------------------
 # Standalone supervisor-lock primitive
 # ---------------------------------------------------------------------------
@@ -746,3 +786,187 @@ def test_serve_runs_until_stop_condition(tmp_path: Path) -> None:
     # second pass is a no-op -> only one spawn call.
     assert calls == [("eli", 1)]
     assert not (tmp_path / "supervisor.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# DesiredStateReconciler: held (keep-alive)
+# ---------------------------------------------------------------------------
+
+
+def test_set_desired_accepts_held(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    rec.hold("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_HELD
+    # The literal is accepted through set_desired too.
+    rec.set_desired("saos", DESIRED_HELD)
+    assert rec.load_state("saos")["desired"] == DESIRED_HELD
+
+
+def test_hold_leaves_running_process_alive(tmp_path: Path) -> None:
+    """A held unit that is running is neither stopped nor re-spawned."""
+    spawn_calls, spawn_action = _recording_spawn()
+    stop_calls, stop_action = _recording_stop()
+    rec = DesiredStateReconciler(
+        tmp_path, spawn_action=spawn_action, stop_action=stop_action
+    )
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+
+    # Bring the unit up through the reconciler.  The recorded spawn points
+    # pid.json at this live test process, so observe_actual reads it running
+    # and the spawn branch records state["pid"].
+    rec.enable("eli")
+    up = rec.reconcile_unit(spec, honor_desired_state)
+    assert up.action == "spawned"
+    assert spawn_calls == [("eli", 1)]
+
+    # Now hold it and reconcile again: warm keep-alive.
+    rec.hold("eli")
+    outcome = rec.reconcile_unit(spec, honor_desired_state)
+    assert outcome.action == "held"
+    assert outcome.desired == DESIRED_HELD
+    assert outcome.actual == "running"
+    assert outcome.alive is True
+    assert outcome.pid == os.getpid()
+    # Neither re-spawned nor stopped -- the process stays resident.
+    assert spawn_calls == [("eli", 1)]  # unchanged: no second spawn
+    assert stop_calls == []
+
+
+def test_hold_does_not_spawn_stopped_unit(tmp_path: Path) -> None:
+    """A held unit that is down stays down -- no force-restart."""
+    spawn_calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+
+    rec.hold("eli")
+    outcome = rec.reconcile_unit(spec, honor_desired_state)
+    assert outcome.action == "held"
+    assert outcome.actual == "stopped"
+    assert outcome.alive is False
+    assert outcome.pid is None
+    assert spawn_calls == []
+
+
+def test_hold_is_still_rejected_as_paused(tmp_path: Path) -> None:
+    """Adding 'held' does not widen the vocabulary to arbitrary values."""
+    rec = DesiredStateReconciler(tmp_path)
+    with pytest.raises(ValueError):
+        rec.set_desired("eli", "paused")
+
+
+# ---------------------------------------------------------------------------
+# WorkerControlPlane
+# ---------------------------------------------------------------------------
+
+
+def test_control_plane_pause_resume_writes_desired(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["eli", "saos"])
+
+    cp.pause("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_HELD
+    cp.resume("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_ENABLED
+    cp.disable("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_DISABLED
+    cp.enable("eli")
+    assert rec.load_state("eli")["desired"] == DESIRED_ENABLED
+
+
+def test_control_plane_observe_whole_fleet(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["eli", "saos"])
+    rec.enable("eli")
+    rec.hold("saos")
+
+    snap = cp.observe()
+    assert [u.unit for u in snap] == ["eli", "saos"]  # declared order
+    by_unit = {u.unit: u for u in snap}
+    assert by_unit["eli"].desired == DESIRED_ENABLED
+    assert by_unit["saos"].desired == DESIRED_HELD
+    # No live process -> stopped, pid None, empty (opaque) heartbeat.
+    assert by_unit["eli"].actual == "stopped"
+    assert by_unit["eli"].pid is None
+    assert by_unit["eli"].heartbeat == {}
+
+
+def test_control_plane_heartbeat_passthrough_opaque(tmp_path: Path) -> None:
+    """Non-core state keys surface as an opaque heartbeat payload."""
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["eli"])
+    rec.enable("eli")
+    # Generation 0 matches the never-spawned unit, so the heartbeat is merged.
+    rec.merge_heartbeat(
+        "eli",
+        {
+            "generation": 0,
+            "worker_status": "parked",
+            "last_window": "2026-07-01",
+            "actual": "lies",  # a core key must never leak through
+        },
+    )
+    obs = cp.observe_unit("eli")
+    assert obs.heartbeat == {"worker_status": "parked", "last_window": "2026-07-01"}
+    # Core keys never appear in the opaque payload.
+    for core in ("schema_version", "unit", "desired", "actual", "generation", "pid"):
+        assert core not in obs.heartbeat
+    # And the reconciler-owned actual wins over any heartbeat-reported value.
+    assert obs.actual == "stopped"
+
+
+def test_control_plane_pid_reported_only_when_running(tmp_path: Path) -> None:
+    spawn_calls, spawn_action = _recording_spawn()
+    rec = DesiredStateReconciler(tmp_path, spawn_action=spawn_action)
+    cp = WorkerControlPlane(rec, ["eli"])
+    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
+    rec.enable("eli")
+    rec.reconcile_unit(spec, honor_desired_state)  # recorded spawn -> running
+
+    obs = cp.observe_unit("eli")
+    assert obs.actual == "running"
+    assert obs.pid == os.getpid()
+
+
+def test_control_plane_observe_is_read_only_on_stale_pid(tmp_path: Path) -> None:
+    """Observe must classify a stale pid file without deleting it.
+
+    Cleaning stale metadata is the supervisor's job, done under its lock during
+    reconcile.  An out-of-process observer (e.g. the FastAPI adapter) that
+    unlinked pid.json could race a pid the supervisor just refreshed and cause a
+    double-spawn -- so observe reports 'stopped' and leaves the filesystem
+    untouched.
+    """
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["eli"])
+    rec.enable("eli")
+    pid_file = rec.unit_dir("eli") / "pid.json"
+    _write_payload(pid_file, {"pid": 999_999_999, "command": [], "started_at": 0})
+
+    obs = cp.observe_unit("eli")
+    assert obs.actual == "stopped"
+    assert obs.pid is None
+    # The stale pid file survives -- observe did not mutate the filesystem.
+    assert pid_file.exists()
+
+
+def test_control_plane_fails_closed_on_unknown_unit(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["eli"])
+    assert cp.units == ("eli",)
+    for op in (cp.observe_unit, cp.pause, cp.resume, cp.enable, cp.disable):
+        with pytest.raises(KeyError):
+            op("saos")
+
+
+def test_unit_observation_immutable() -> None:
+    obs = UnitObservation(
+        unit="eli",
+        desired=DESIRED_ENABLED,
+        actual="running",
+        generation=1,
+        pid=42,
+        heartbeat={},
+    )
+    assert obs.pid == 42
+    with pytest.raises(AttributeError):
+        obs.pid = 7  # type: ignore[misc]

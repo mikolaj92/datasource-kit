@@ -12,7 +12,7 @@ from .completeness import CompletenessReport
 __all__ = ["IngestReport"]
 
 # Keep in sync with datasource_kit version string if one is added.
-_KIT_VERSION = "0.1.0"
+_KIT_VERSION = "0.2.0"
 
 
 @dataclass
