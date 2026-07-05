@@ -246,6 +246,74 @@ def test_liveness_non_integer_pid_is_stale(tmp_path: Path) -> None:
     assert result.state == "stale"
 
 
+def test_liveness_zombie_child_is_stale(tmp_path: Path) -> None:
+    """A zombie child (exited but unreaped) reads as 'stale', not 'running'.
+
+    ``os.kill(pid, 0)`` keeps succeeding for a zombie because the PID slot is
+    still occupied. If ``liveness`` reported that as 'running', the reconciler
+    would never respawn a crashed worker whose parent is the supervisor itself.
+    """
+    from datasource_kit.fleet import _pid_alive, _pid_is_zombie, stop_process
+
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child hard-exits, never returns to pytest
+        os._exit(0)
+
+    try:
+        # The child has exited but this process has not reaped it, so it is now
+        # a zombie. Poll (rather than fixed-sleep) for the kernel transition.
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not _pid_is_zombie(pid):
+            time.sleep(0.02)
+
+        assert _pid_is_zombie(pid) is True
+        assert _pid_alive(pid) is False
+
+        unit_dir = tmp_path / "zombie"
+        _write_payload(unit_dir / "pid.json", {"pid": pid, "command": []})
+        assert liveness(unit_dir).state == "stale"
+
+        # stop_process on a zombie must return "already dead" at once, not wait
+        # out its timeout on a SIGTERM that can never be acknowledged.
+        outcome = stop_process(pid, timeout=5.0)
+        assert outcome.signalled is False
+        assert outcome.killed is False
+    finally:
+        os.waitpid(pid, 0)
+
+
+def test_pid_alive_zombie_via_ps_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_pid_alive excludes a Z-state process deterministically (no real fork).
+
+    Keeps the zombie-exclusion logic under test on hosts where forking a real
+    zombie is undesirable: ``os.kill`` succeeds (slot occupied) but ``ps``
+    reports the state column.
+    """
+    from datasource_kit import fleet
+
+    monkeypatch.setattr(fleet.os, "kill", lambda pid, sig: None)
+
+    def _ps(state: str):
+        def run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=state, stderr="")
+
+        return run
+
+    monkeypatch.setattr(fleet.subprocess, "run", _ps("Z+\n"))
+    assert fleet._pid_alive(4242) is False
+
+    monkeypatch.setattr(fleet.subprocess, "run", _ps("S\n"))
+    assert fleet._pid_alive(4242) is True
+
+
+def test_pid_alive_nonpositive_pid_is_dead() -> None:
+    """A zero/negative pid is never alive (guards os.kill(0)/os.kill(-1))."""
+    from datasource_kit.fleet import _pid_alive
+
+    assert _pid_alive(0) is False
+    assert _pid_alive(-1) is False
+
+
 # ---------------------------------------------------------------------------
 # Stop
 # ---------------------------------------------------------------------------
