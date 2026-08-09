@@ -10,7 +10,8 @@ It supports four faces:
   for bytes-in/ref-out payload persistence.
 * **Autonomous worker hosting** -- :class:`~datasource_kit.worker.WorkerHost`
   owns checkpoint, heartbeat, backoff, and shutdown mechanics around consumer
-  source intent.
+  source intent; :class:`~datasource_kit.continuous.ContinuousWorkerHost` is a
+  sibling for repeating already-persisted opaque steps from post-step decisions.
 * **Fleet supervision** -- :mod:`~datasource_kit.fleet` domain-blind process
   supervision primitives (spawn, stop, liveness) for long-lived worker OS
   processes.
@@ -23,6 +24,14 @@ and can be described declaratively with
 from __future__ import annotations
 
 from .completeness import CompletenessReport, LayerCoverage, layers_from_names
+from .continuous import (
+    BoundaryAction,
+    ContinuousWorkerHost,
+    LoopAction,
+    LoopContext,
+    LoopDirective,
+    LoopRun,
+)
 from .errors import (
     DatasourceKitError,
     InventoryError,
@@ -108,6 +117,12 @@ from .worker import (
 )
 
 __all__ = [
+    "BoundaryAction",
+    "ContinuousWorkerHost",
+    "LoopAction",
+    "LoopContext",
+    "LoopDirective",
+    "LoopRun",
     "ArtifactStore",
     "StepDecision",
     "WorkDirective",

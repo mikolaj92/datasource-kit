@@ -13,8 +13,10 @@ It has four honest faces:
   `completeness`, and structural storage/artifact protocols;
 - an **opt-in runtime**: `run_ingest`, which is one composition of those
   primitives, never the only way to use the kit;
-- an **autonomous worker host**: `WorkerHost`, which wraps consumer planning,
-  fetch, transform, and persistence intent in a common lifecycle loop;
+- **autonomous worker hosts**: `WorkerHost`, which wraps consumer planning,
+  fetch, transform, and persistence intent, and the domain-blind sibling
+  `ContinuousWorkerHost`, which repeats an opaque, already-persisted step from
+  its post-step lifecycle decision;
 - a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
   process supervision primitives (spawn, stop, liveness) plus a
   `DesiredStateReconciler` (desired/actual state files, generation fencing, an
@@ -183,6 +185,46 @@ supported for compatibility, though new integrations should use decisions and
 a late checkpoint method. `heartbeat` is an optional callback receiving
 `WorkerHeartbeat`; callback failures are isolated from work. `max_iterations`
 supports bounded/one-shot embedding.
+
+### Continuous post-step host
+
+`ContinuousWorkerHost` is a composition sibling, not a replacement for
+`WorkerHost`. Use it when the consumer must interpret and persist an opaque
+result before deciding whether to continue, wait, or stop. It owns only loop
+mechanics and never inspects the result or checkpoint:
+
+```python
+from datasource_kit import ContinuousWorkerHost, LoopAction, LoopDirective
+
+def step(context):
+    result = obtain_and_persist(sequence=context.sequence)
+    if result.is_finished:
+        return LoopDirective(LoopAction.STOP, counted=False, reason="finished")
+    if result.should_poll:
+        return LoopDirective(
+            LoopAction.WAIT, delay=5, counted=False, reason="polling"
+        )
+    return LoopDirective(LoopAction.CONTINUE)
+
+run = ContinuousWorkerHost(step, rotation_attempts=200).run()
+```
+
+A step sees its current attempt number: the first `LoopContext` has `sequence=1`
+and `attempts_in_boundary=1`. `sequence` increases for every step invocation,
+including failures. `counted` increases only when the returned directive sets
+`counted=True`; therefore `run(max_counted=N)` can bound productive work while
+ignoring polls or error attempts. `attempts_in_boundary` resets after a requested
+or periodic rotation. Periodic rotation happens before attempt *N+1*.
+
+`WAIT` uses its non-negative `delay`; a real wait is interruptible through
+`request_stop()`. `repeated_wait` tells callbacks whether the preceding outcome
+was a wait or mapped error, enabling consumer-owned edge-trigger policy. The
+optional `control` callback can return a directive between steps (for example,
+a warm pause), and `rotate(context, reason)` performs consumer-owned boundary
+replacement. An exception from `step` is propagated unless `on_error` maps it
+to a `LoopDirective`; an exception from `on_error` is always propagated.
+`observe` is best-effort telemetry and must not be used for durable effects.
+Concurrent calls to the same host's `run()` are rejected.
 
 ## Install
 
