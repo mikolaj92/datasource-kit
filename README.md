@@ -122,6 +122,42 @@ own environment, richer pid metadata) while the kit stays domain-blind. No
 health semantics beyond process liveness -- health interpretation stays in the
 consumer.
 
+### Generic fleet pass hosting
+
+`FleetHost` is the minimal orchestration face for consumers that already own
+fleet membership and reconciliation. It materializes an iterable of opaque
+units once, preserving the consumer's order, then runs two injected callbacks:
+admission once at the start of every pass and reconciliation once per unit.
+`FleetPass` returns the opaque admission value and ordered result tuple.
+
+```python
+from datasource_kit import FleetHost
+
+host = FleetHost(
+    lock_path="var/supervisor.lock",
+    units=("eli", "saos"),                 # consumer-chosen fixed order
+    admit=lambda units: validate_inventory(units),
+    reconcile=lambda unit: reconcile_unit(unit),
+    lock_payload=lambda: {"managed_by": "my-supervisor"},
+)
+
+one_pass = host.reconcile_pass()            # intentionally unlocked
+locked_pass = host.run_once()               # one lock for one pass
+host.serve(
+    interval=5.0,
+    on_pass=lambda completed: log(completed),
+    stop_condition=lambda: shutting_down(),
+)                                            # one lock held for the whole loop
+```
+
+Admission is fail-closed: if it raises, no unit is reconciled. It is repeated
+on every `serve` pass. Units and all callback values are opaque; the host knows
+nothing about datasources, inventory meaning, desired state, or health.
+Exceptions from admission, reconciliation, reporting, and sleeping propagate
+unchanged, and the acquired lock is released in every case. In `serve`, the
+pass callback runs while the lock is held and before the stop check and sleep.
+The interval must be positive and is validated before lock acquisition.
+
 ### Fleet inventory
 
 A fleet supervisor needs to know which units exist and what they can do. Rather
