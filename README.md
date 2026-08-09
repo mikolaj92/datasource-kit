@@ -6,13 +6,15 @@ explainable reports, errors, and a CLI. It refuses the **what**: which source,
 which endpoints, parsing, identity rules, completeness layer names, and grading
 verdicts.
 
-It has four honest faces:
+It has five honest faces:
 
 - a **primitives library**: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
   `journal`, `results`, `window`, `ledger`, `ratelimit`, `retry`,
   `completeness`, and structural storage/artifact protocols;
 - an **opt-in runtime**: `run_ingest`, which is one composition of those
   primitives, never the only way to use the kit;
+- a tiny **execution boundary**: `ExecutionBackend`, which wraps one opaque,
+  synchronous in-process callback without owning run or retry policy;
 - **autonomous worker hosts**: `WorkerHost`, which wraps consumer planning,
   fetch, transform, and persistence intent, and the domain-blind sibling
   `ContinuousWorkerHost`, which repeats an opaque, already-persisted step from
@@ -225,6 +227,40 @@ replacement. An exception from `step` is propagated unless `on_error` maps it
 to a `LoopDirective`; an exception from `on_error` is always propagated.
 `observe` is best-effort telemetry and must not be used for durable effects.
 Concurrent calls to the same host's `run()` are rejected.
+
+## Execution Backend
+
+`ExecutionBackend` is a structural, dependency-free seam for choosing where and
+how one opaque callback executes and is observed. The built-in
+`InlineExecutionBackend` calls it synchronously in the current process:
+
+```python
+from datasource_kit import ExecutionRequest, InlineExecutionBackend
+
+backend = InlineExecutionBackend()
+summary = backend.execute(
+    ExecutionRequest(
+        run_id="run-42",
+        execution_id="run-42:step-3",
+        inputs={"checkpoint": {"cursor": 10}},
+        metadata={"step": 3, "source": "consumer-defined"},
+    ),
+    lambda: perform_step(),
+)
+```
+
+The callback is invoked exactly once. Its return value is returned unchanged
+(the same object), and its exception is propagated unchanged. `inputs` and
+`metadata` are opaque, caller-owned JSON-compatible diagnostics: the kit neither
+validates nor interprets their vocabulary. A custom backend may add observation
+or durable recording, but concurrency and recording policy are its own
+responsibility.
+
+This boundary intentionally does **not** create or finalize runs, mint IDs,
+retry, checkpoint, persist business data, clean results, or manage result
+lifetimes. There is no Fala execution adapter until Fala provides a supported
+durable in-process recording API; the existing optional Fala artifact adapter
+is separate.
 
 ## Install
 

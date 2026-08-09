@@ -1,6 +1,6 @@
 """datasource-kit: a generic, dependency-free toolkit for managing many datasources.
 
-It supports four faces:
+It supports five faces:
 
 * **Ingest primitives** -- batch reference-data updaters and long-running
   scraper workers built on :class:`~datasource_kit.protocols.DataSource`,
@@ -8,6 +8,8 @@ It supports four faces:
   retry mechanics, plus the opt-in ``run_ingest`` runtime.
 * **Artifact backends** -- :class:`~datasource_kit.protocols.ArtifactStore`
   for bytes-in/ref-out payload persistence.
+* **Execution backends** -- :class:`~datasource_kit.execution.ExecutionBackend`
+  wraps one opaque synchronous callback without owning run or retry policy.
 * **Autonomous worker hosting** -- :class:`~datasource_kit.worker.WorkerHost`
   owns checkpoint, heartbeat, backoff, and shutdown mechanics around consumer
   source intent; :class:`~datasource_kit.continuous.ContinuousWorkerHost` is a
@@ -43,6 +45,7 @@ from .errors import (
     TransportError,
     ValidationError,
 )
+from .execution import ExecutionBackend, ExecutionRequest, InlineExecutionBackend
 from .fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
@@ -149,12 +152,15 @@ __all__ = [
     "EXECUTION_AUTONOMOUS",
     "Enumerator",
     "Evidence",
+    "ExecutionBackend",
     "ExecutionModel",
+    "ExecutionRequest",
     "Fetcher",
     "GENERATION_ENV",
     "IngestReport",
     "InMemoryArtifactStore",
     "InMemoryStore",
+    "InlineExecutionBackend",
     "IngestActor",
     "InventoryEntry",
     "InventoryError",
