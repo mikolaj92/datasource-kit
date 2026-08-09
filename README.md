@@ -6,13 +6,15 @@ explainable reports, errors, and a CLI. It refuses the **what**: which source,
 which endpoints, parsing, identity rules, completeness layer names, and grading
 verdicts.
 
-It has three honest faces:
+It has four honest faces:
 
 - a **primitives library**: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
   `journal`, `results`, `window`, `ledger`, `ratelimit`, `retry`,
   `completeness`, and structural storage/artifact protocols;
 - an **opt-in runtime**: `run_ingest`, which is one composition of those
   primitives, never the only way to use the kit;
+- an **autonomous worker host**: `WorkerHost`, which wraps consumer planning,
+  fetch, transform, and persistence intent in a common lifecycle loop;
 - a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
   process supervision primitives (spawn, stop, liveness) plus a
   `DesiredStateReconciler` (desired/actual state files, generation fencing, an
@@ -140,6 +142,47 @@ A `Manifest` states how a source runs with a first-class `execution`
 (`ExecutionModel(model, step_ref)`); `model="autonomous"` marks a long-lived
 worker and requires a `SourceContract`. The older boolean `supports_autonomous`
 is still honoured by `is_autonomous` but is superseded by `execution`.
+
+## Autonomous Worker Host
+
+`WorkerHost` is the minimal in-process lifecycle loop for sources whose work is
+self-directed rather than queue-driven. The consumer implements `WorkerIntent`
+(`plan`, `fetch`, `transform`, idempotent `persist`, and `checkpoint`); the kit
+owns checkpoint load/save, lifecycle heartbeats, idle polling, exponential
+failure backoff, and cooperative shutdown:
+
+```python
+from datasource_kit import FileCheckpointStore, StepDecision, WorkDirective, WorkerHost
+
+class Source:
+    def plan(self, checkpoint):
+        if already_finished(checkpoint):
+            return StepDecision(WorkDirective.STOP)
+        return StepDecision(WorkDirective.CONTINUE, {"after": checkpoint})
+    def fetch(self, plan): ...
+    def transform(self, payload, plan): ...
+    def persist(self, records, plan): ...  # must be idempotent
+    def checkpoint(self, records, plan):
+        return records.next_cursor  # can depend on the actual outcome
+
+host = WorkerHost(Source(), FileCheckpointStore("state/checkpoint.json"))
+host.run()  # another thread or signal handler may call host.request_stop()
+```
+
+The generic directives are `CONTINUE` (run the pipeline), `IDLE` (poll later),
+and `STOP` (normal terminal completion). Their mapping to source-specific
+statuses is entirely consumer-owned.
+
+The order is strictly `plan -> fetch -> transform -> persist -> checkpoint ->
+checkpoint store`. Thus the next checkpoint can be derived late from the actual
+outcome, and never advances unless persistence succeeds. Since arbitrary storage
+and checkpoint files cannot share a transaction, a crash between those actions
+may replay a plan: the contract is deliberately **at least once**. The original
+`WorkerStep(plan, checkpoint)` and `None`-means-idle planner forms remain
+supported for compatibility, though new integrations should use decisions and
+a late checkpoint method. `heartbeat` is an optional callback receiving
+`WorkerHeartbeat`; callback failures are isolated from work. `max_iterations`
+supports bounded/one-shot embedding.
 
 ## Install
 
