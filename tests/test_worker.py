@@ -10,6 +10,8 @@ from datasource_kit import (
     BackoffPolicy,
     FileCheckpointStore,
     InMemoryCheckpointStore,
+    StepDecision,
+    WorkDirective,
     WorkerHost,
     WorkerStep,
 )
@@ -203,3 +205,104 @@ def test_iteration_bound_validation_and_zero_iteration_run() -> None:
     result = host.run(max_iterations=0)
     assert result.iterations == 0
     assert result.checkpoint == "x"
+
+
+class LateCheckpointIntent:
+    def __init__(self, decisions: list[StepDecision]) -> None:
+        self.decisions = decisions
+        self.calls: list[tuple[str, object]] = []
+
+    def plan(self, checkpoint: object | None) -> StepDecision:
+        self.calls.append(("plan", checkpoint))
+        return self.decisions.pop(0)
+
+    def fetch(self, plan: object) -> object:
+        self.calls.append(("fetch", plan))
+        return {"records": [plan], "cursor": f"after-{plan}"}
+
+    def transform(self, payload: object, plan: object) -> object:
+        self.calls.append(("transform", payload))
+        return payload
+
+    def persist(self, transformed: object, plan: object) -> None:
+        self.calls.append(("persist", transformed))
+
+    def checkpoint(self, transformed: object, plan: object) -> object:
+        self.calls.append(("checkpoint", transformed))
+        return transformed["cursor"]
+
+
+def test_checkpoint_can_be_derived_from_outcome_after_persistence() -> None:
+    intent = LateCheckpointIntent([StepDecision(WorkDirective.CONTINUE, "page")])
+    store = InMemoryCheckpointStore("old")
+
+    result = WorkerHost(intent, store).run(max_iterations=1)
+
+    assert result.checkpoint == "after-page"
+    assert store.load() == "after-page"
+    assert [name for name, _ in intent.calls] == [
+        "plan",
+        "fetch",
+        "transform",
+        "persist",
+        "checkpoint",
+    ]
+
+
+def test_late_checkpoint_is_not_computed_when_persistence_fails() -> None:
+    class Broken(LateCheckpointIntent):
+        def persist(self, transformed: object, plan: object) -> None:
+            self.calls.append(("persist", transformed))
+            raise RuntimeError("database down")
+
+    intent = Broken([StepDecision(WorkDirective.CONTINUE, "page")])
+    store = InMemoryCheckpointStore("old")
+    result = WorkerHost(
+        intent,
+        store,
+        backoff=BackoffPolicy(initial_seconds=0, maximum_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=1)
+
+    assert result.failures == 1
+    assert store.load() == "old"
+    assert "checkpoint" not in [name for name, _ in intent.calls]
+
+
+def test_idle_and_stop_directives_are_generic_and_stop_is_terminal() -> None:
+    intent = LateCheckpointIntent(
+        [
+            StepDecision(WorkDirective.IDLE),
+            StepDecision(WorkDirective.STOP),
+        ]
+    )
+    events = []
+    sleeps = []
+    result = WorkerHost(
+        intent,
+        InMemoryCheckpointStore("cursor"),
+        backoff=BackoffPolicy(idle_seconds=3),
+        sleep=sleeps.append,
+        heartbeat=events.append,
+    ).run()
+
+    assert result.iterations == 2
+    assert result.completed == 0
+    assert result.checkpoint == "cursor"
+    assert sleeps == [3]
+    assert [event.state for event in events] == ["starting", "idle", "stopped"]
+
+
+def test_continue_requires_late_checkpoint_for_new_intent() -> None:
+    class Missing(Intent):
+        def plan(self, checkpoint: object | None) -> StepDecision:
+            return StepDecision(WorkDirective.CONTINUE, "p")
+
+    result = WorkerHost(
+        Missing([]),
+        InMemoryCheckpointStore("old"),
+        backoff=BackoffPolicy(initial_seconds=0, maximum_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=1)
+    assert result.failures == 1
+    assert result.checkpoint == "old"

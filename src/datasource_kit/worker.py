@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -24,6 +25,8 @@ __all__ = [
     "CheckpointStore",
     "FileCheckpointStore",
     "InMemoryCheckpointStore",
+    "StepDecision",
+    "WorkDirective",
     "WorkerHeartbeat",
     "WorkerHost",
     "WorkerIntent",
@@ -34,28 +37,61 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class WorkerStep:
-    """A consumer-planned unit of work and its checkpoint after success."""
+    """A legacy consumer-planned unit and its checkpoint after success.
+
+    New intents should return :class:`StepDecision` and derive their checkpoint
+    from the actual outcome in ``WorkerIntent.checkpoint``.  The early
+    checkpoint form remains supported for existing consumers.
+    """
 
     plan: object
     checkpoint: object
+
+
+class WorkDirective(str, Enum):
+    """Domain-blind instruction returned by an autonomous planner."""
+
+    CONTINUE = "continue"
+    IDLE = "idle"
+    STOP = "stop"
+
+
+@dataclass(frozen=True, slots=True)
+class StepDecision:
+    """Choose whether the host should do work, poll, or terminate normally.
+
+    ``work`` is opaque to the host and is passed to the intent pipeline for a
+    ``CONTINUE`` decision.  It is ignored for ``IDLE`` and ``STOP``.
+    """
+
+    directive: WorkDirective
+    work: object | None = None
 
 
 @runtime_checkable
 class WorkerIntent(Protocol):
     """Source-specific work performed by :class:`WorkerHost`.
 
-    ``plan`` returns ``None`` when currently idle.  ``persist`` should be
-    idempotent because successful persistence and checkpoint storage cannot be
-    made atomic across arbitrary consumer backends.
+    ``plan`` returns a generic directive.  ``checkpoint`` is deliberately
+    called *after* successful persistence, so a checkpoint may depend on the
+    fetched/transformed outcome without side effects during planning.
+    ``persist`` should be idempotent because successful persistence and
+    checkpoint storage cannot be made atomic across arbitrary backends.
+
+    For compatibility, the host also accepts ``None`` as ``IDLE`` and an old
+    :class:`WorkerStep`; an old intent without ``checkpoint`` uses the
+    checkpoint carried by that step.
     """
 
-    def plan(self, checkpoint: object | None) -> WorkerStep | None: ...
+    def plan(self, checkpoint: object | None) -> StepDecision | WorkerStep | None: ...
 
     def fetch(self, plan: object) -> object: ...
 
     def transform(self, payload: object, plan: object) -> object: ...
 
     def persist(self, transformed: object, plan: object) -> None: ...
+
+    def checkpoint(self, transformed: object, plan: object) -> object: ...
 
 
 @runtime_checkable
@@ -166,6 +202,9 @@ class WorkerRun:
     iterations: int
 
 
+_MISSING = object()
+
+
 class WorkerHost:
     """Run one source intent with at-least-once checkpoint semantics."""
 
@@ -213,20 +252,48 @@ class WorkerHost:
             ):
                 iterations += 1
                 try:
-                    step = self.intent.plan(checkpoint)
-                    if step is None:
+                    planned = self.intent.plan(checkpoint)
+                    if planned is None:
+                        decision = StepDecision(WorkDirective.IDLE)
+                        legacy_checkpoint = _MISSING
+                    elif isinstance(planned, WorkerStep):
+                        decision = StepDecision(WorkDirective.CONTINUE, planned.plan)
+                        legacy_checkpoint = planned.checkpoint
+                    elif isinstance(planned, StepDecision):
+                        decision = planned
+                        legacy_checkpoint = _MISSING
+                    else:
+                        raise TypeError(
+                            "intent.plan() must return StepDecision, WorkerStep, or None"
+                        )
+
+                    if not isinstance(decision.directive, WorkDirective):
+                        raise TypeError("StepDecision.directive must be a WorkDirective")
+                    if decision.directive is WorkDirective.STOP:
+                        consecutive = 0
+                        break
+                    if decision.directive is WorkDirective.IDLE:
                         consecutive = 0
                         self._emit("idle", checkpoint, completed, failures, consecutive)
                         self._wait(self.backoff.idle_seconds)
                         continue
-                    if not isinstance(step, WorkerStep):
-                        raise TypeError("intent.plan() must return WorkerStep or None")
+
+                    plan = decision.work
                     self._emit("working", checkpoint, completed, failures, consecutive)
-                    payload = self.intent.fetch(step.plan)
-                    transformed = self.intent.transform(payload, step.plan)
-                    self.intent.persist(transformed, step.plan)
-                    self.checkpoints.save(step.checkpoint)
-                    checkpoint = step.checkpoint
+                    payload = self.intent.fetch(plan)
+                    transformed = self.intent.transform(payload, plan)
+                    self.intent.persist(transformed, plan)
+                    checkpoint_method = getattr(self.intent, "checkpoint", None)
+                    if checkpoint_method is not None:
+                        next_checkpoint = checkpoint_method(transformed, plan)
+                    elif legacy_checkpoint is not _MISSING:
+                        next_checkpoint = legacy_checkpoint
+                    else:
+                        raise TypeError(
+                            "intent.checkpoint() is required for a CONTINUE decision"
+                        )
+                    self.checkpoints.save(next_checkpoint)
+                    checkpoint = next_checkpoint
                     completed += 1
                     consecutive = 0
                     self._emit("checkpointed", checkpoint, completed, failures, consecutive)

@@ -98,6 +98,8 @@ from .worker import (
     CheckpointStore,
     FileCheckpointStore,
     InMemoryCheckpointStore,
+    StepDecision,
+    WorkDirective,
     WorkerHeartbeat,
     WorkerHost,
     WorkerIntent,
@@ -107,6 +109,8 @@ from .worker import (
 
 __all__ = [
     "ArtifactStore",
+    "StepDecision",
+    "WorkDirective",
     "WorkerStep",
     "WorkerRun",
     "WorkerIntent",
