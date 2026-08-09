@@ -22,8 +22,8 @@ import socket
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Generic, TypeVar
 
@@ -67,30 +67,47 @@ __all__ = [
 # Pure-data shapes
 # ---------------------------------------------------------------------------
 
+#: Default child environment key used for reconciler generations.
+GENERATION_ENV = "DATASOURCE_KIT_GENERATION"
+_PROBE_SLEEP = 0.25
+_PROBE_WINDOW = 1.5
+
+StreamOpener = Callable[[Path], IO[Any]]
+
 
 @dataclass(slots=True, frozen=True)
 class ProcessSpec:
     """Declarative description of a worker process to spawn.
 
-    Parameters
-    ----------
-    unit:
-        Opaque unit identifier (typically a datasource name, consumer-chosen).
-    command:
-        Executable path and arguments (passed to ``subprocess.Popen``).
-    cwd:
-        Working directory for the child process, or ``None`` to inherit.
-    env:
-        Environment variables for the child, or ``None`` to inherit.
-    label:
-        Human-readable label for logging / dashboards (consumer-chosen).
+    ``env`` is an optional complete base environment (``None`` inherits the
+    parent); ``env_overlay`` is then applied without ever being written to pid
+    metadata.  When :func:`spawn` receives a generation, it is injected last
+    under ``generation_env`` (set it to ``None`` to disable injection).
+
+    ``stdout_path`` and ``stderr_path`` are consumer-owned paths opened in
+    append mode.  The kit chooses neither their layout nor names.  ``opener``
+    may replace the default append opener (it is called once per configured
+    path); every returned descriptor is closed in the parent after spawning,
+    including on errors.
+
+    ``pid_metadata`` is JSON-compatible, opaque consumer metadata added to the
+    top level of ``pid.json``.  It may not replace the standard ``pid``,
+    ``command``, ``started_at``, or ``label`` fields.
     """
 
     unit: str
     command: tuple[str, ...]
     cwd: str | None = None
-    env: dict[str, str] | None = None
+    env: Mapping[str, str] | None = None
     label: str = ""
+    stdout_path: str | Path | None = None
+    stderr_path: str | Path | None = None
+    opener: StreamOpener | None = None
+    probe_window: float = _PROBE_WINDOW
+    probe_sleep: float = _PROBE_SLEEP
+    env_overlay: Mapping[str, str] = field(default_factory=dict)
+    generation_env: str | None = GENERATION_ENV
+    pid_metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
@@ -139,8 +156,6 @@ class Liveness:
 # ---------------------------------------------------------------------------
 
 _PID_FILE = "pid.json"
-_PROBE_SLEEP = 0.25  # seconds to wait before the first exit-probe
-_PROBE_WINDOW = 1.5  # total seconds for the immediate-exit probe window
 _STOP_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = signal.SIGKILL
 _DEFAULT_TIMEOUT = 5.0  # seconds before escalating to SIGKILL
@@ -164,21 +179,36 @@ def _read_pid(unit_dir: str | Path) -> dict[str, Any] | None:
     return data
 
 
-def _write_pid(
-    unit_dir: str | Path, pid: int, command: tuple[str, ...], label: str
-) -> None:
+_STANDARD_PID_KEYS = frozenset({"pid", "command", "started_at", "label"})
+
+
+def _pid_payload(spec: ProcessSpec, result: SpawnResult) -> dict[str, object]:
+    metadata = dict(spec.pid_metadata)
+    collisions = _STANDARD_PID_KEYS.intersection(metadata)
+    if collisions:
+        joined = ", ".join(sorted(collisions))
+        raise ValueError(f"pid_metadata may not replace standard fields: {joined}")
+    payload: dict[str, object] = {
+        "pid": result.pid,
+        "command": list(spec.command),
+        "started_at": result.started_at,
+        "label": spec.label,
+        **metadata,
+    }
+    # Fail before starting a child when opaque metadata cannot be persisted.
+    json.dumps(payload)
+    return payload
+
+
+def _write_pid(unit_dir: str | Path, payload: Mapping[str, object]) -> None:
     """Atomically write *pid.json* to *unit_dir*."""
     path = _pid_path(unit_dir)
+    write_json_atomic(path, payload)
+
+
+def _append_opener(path: Path) -> IO[Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "pid": pid,
-        "command": list(command),
-        "started_at": time.time(),
-        "label": label,
-    }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    return path.open("a", encoding="utf-8")
 
 
 def _clean_pid(unit_dir: str | Path) -> bool:
@@ -317,24 +347,61 @@ def spawn_process(
     return SpawnResult(pid=proc.pid, started_at=started_at, alive=alive)
 
 
-def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None) -> SpawnResult:
+def spawn(
+    spec: ProcessSpec,
+    *,
+    unit_dir: str | Path | None = None,
+    generation: int | None = None,
+) -> SpawnResult:
     """Start a worker process described by *spec*.
 
-    Writes ``pid.json`` metadata atomically to *unit_dir* (or
-    ``spec.unit`` as a directory name when *unit_dir* is ``None``).
-
-    Delegates the raw spawn + immediate-exit probe to :func:`spawn_process`
-    and only persists ``pid.json`` once the child survives the probe, so a
-    failed spawn (``alive=False``) leaves no stale pid metadata behind.
+    Consumer-owned log destinations are opened in append mode (or through the
+    injected opener) and closed in the parent as soon as ``Popen`` and probing
+    finish. Environment overlays and optional generation injection affect only
+    the child; neither environment is serialized. ``pid.json`` is atomically
+    persisted only after the child survives the configured probe window.
     """
     resolved = Path(unit_dir) if unit_dir is not None else Path(spec.unit)
     resolved.mkdir(parents=True, exist_ok=True)
+    payload_template = _pid_payload(
+        spec, SpawnResult(pid=0, started_at=0.0, alive=False)
+    )
 
-    result = spawn_process(spec.command, cwd=spec.cwd, env=spec.env)
+    child_env = dict(os.environ) if spec.env is None else dict(spec.env)
+    child_env.update(spec.env_overlay)
+    if generation is not None and spec.generation_env is not None:
+        child_env[spec.generation_env] = str(generation)
+
+    open_stream = spec.opener or _append_opener
+    with ExitStack() as stack:
+        stdout = (
+            stack.enter_context(open_stream(Path(spec.stdout_path)))
+            if spec.stdout_path is not None
+            else None
+        )
+        stderr = (
+            stack.enter_context(open_stream(Path(spec.stderr_path)))
+            if spec.stderr_path is not None
+            else None
+        )
+        result = spawn_process(
+            spec.command,
+            cwd=spec.cwd,
+            env=child_env,
+            stdout=stdout,
+            stderr=stderr,
+            probe_window=spec.probe_window,
+            probe_sleep=spec.probe_sleep,
+        )
 
     if result.alive:
-        _write_pid(resolved, result.pid, spec.command, spec.label)
-
+        payload = dict(payload_template)
+        payload.update(pid=result.pid, started_at=result.started_at)
+        _write_pid(resolved, payload)
+    else:
+        # Do not leave pre-existing stale metadata suggesting this failed child
+        # is alive.
+        _clean_pid(resolved)
     return result
 
 
@@ -471,11 +538,6 @@ DESIRED_DISABLED = "disabled"
 #: keeps the process alive and carries the opaque label; what "paused" means for
 #: the loop is the consumer's decision.
 DESIRED_PAUSED = "paused"
-
-#: Environment variable the default spawn action injects into each child so a
-#: worker can stamp its heartbeats with the generation it was spawned under.
-#: Consumers that inject their own spawn action pick their own variable name.
-GENERATION_ENV = "DATASOURCE_KIT_GENERATION"
 
 #: State keys the reconciler owns.  ``merge_heartbeat`` refuses to let a worker
 #: heartbeat overwrite any of these, and :class:`WorkerControlPlane` treats
@@ -727,9 +789,7 @@ def _default_spawn_action(
     spec: ProcessSpec, generation: int, unit_dir: Path
 ) -> SpawnResult:
     """Spawn via :func:`spawn`, injecting the generation into the child env."""
-    env = dict(os.environ) if spec.env is None else dict(spec.env)
-    env[GENERATION_ENV] = str(generation)
-    return spawn(replace(spec, env=env), unit_dir=unit_dir)
+    return spawn(spec, unit_dir=unit_dir, generation=generation)
 
 
 def _default_stop_action(unit_dir: Path) -> StopResult:
