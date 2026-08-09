@@ -82,8 +82,10 @@ A consumer supplies two things:
 The `datasource_kit.fleet` module provides stdlib-only process supervision
 primitives for long-lived worker OS processes:
 
-- `ProcessSpec(unit, command, cwd, env, label)` -- declarative unit description
-  built by the consumer.
+- `ProcessSpec(...)` -- declarative unit description built by the consumer,
+  including optional consumer-owned append paths for stdout/stderr (or an
+  injected opener), immediate-exit probe timing, environment overlay and
+  generation injection, and opaque JSON pid metadata.
 - `spawn(spec) -> SpawnResult` -- starts a subprocess with `start_new_session`,
   writes pid.json atomically, and performs a fail-closed immediate-exit probe.
 - `stop(unit_dir, timeout) -> StopResult` -- SIGTERM to the process group,
@@ -116,9 +118,28 @@ lock / generation-fencing / atomic-write mechanics.
   `policy` is a consumer hook (`honor_desired_state` is the default) deciding
   per unit whether it should run -- the kit never decides which units run.
 
-Launch/stop are injectable (`spawn_action` / `stop_action`), defaulting to
-`spawn` / `stop`, so a consumer can keep a richer launch (log redirection, its
-own environment, richer pid metadata) while the kit stays domain-blind. No
+The default launch handles rich, consumer-declared process specs directly;
+launch/stop remain injectable (`spawn_action` / `stop_action`). For example:
+
+```python
+spec = ProcessSpec(
+    unit="consumer-chosen",
+    command=("python", "-m", "my_worker"),
+    stdout_path="var/my-layout/current.log",  # append mode
+    stderr_path="var/my-layout/current.err",
+    env_overlay={"WORKER_MODE": "continuous"},
+    generation_env="MY_GENERATION",          # injected by reconciler
+    probe_window=2.0,
+    probe_sleep=0.1,
+    pid_metadata={"session": "opaque-consumer-value"},
+)
+```
+
+Paths and names remain consumer-owned. Environment values are used only for
+launch and are never serialized into `pid.json`; opaque pid metadata must be
+JSON-compatible and cannot replace the standard pid fields. Parent-side log
+descriptors are closed after spawning. A pid file is written atomically only
+after the child survives its probe window, and immediate exit leaves none. No
 health semantics beyond process liveness -- health interpretation stays in the
 consumer.
 

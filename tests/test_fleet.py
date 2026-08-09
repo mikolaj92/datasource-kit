@@ -122,6 +122,117 @@ def test_spawn_with_env_and_cwd(tmp_path: Path) -> None:
     assert not (unit_dir / "pid.json").exists()
 
 
+def test_spawn_rich_spec_logs_env_generation_and_metadata(tmp_path: Path) -> None:
+    """Rich declarative launch stays domain-blind and persists no secrets."""
+    stdout_path = tmp_path / "consumer" / "worker.log"
+    stderr_path = tmp_path / "consumer" / "worker.err"
+    spec = ProcessSpec(
+        unit="opaque-unit",
+        command=(
+            PYTHON,
+            "-c",
+            "import os,sys,time; print(os.environ['OVERLAY'], flush=True); "
+            f"print(os.environ['{GENERATION_ENV}'], file=sys.stderr, flush=True); "
+            "time.sleep(30)",
+        ),
+        env={"BASE": "base", "SECRET": "do-not-persist"},
+        env_overlay={"OVERLAY": "overlaid"},
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_window=0.15,
+        probe_sleep=0.02,
+        pid_metadata={"consumer": {"session": "abc"}, "attempt": 4},
+    )
+    unit_dir = tmp_path / "state"
+    result = spawn(spec, unit_dir=unit_dir, generation=7)
+    try:
+        assert result.alive is True
+        assert stdout_path.read_text(encoding="utf-8").strip() == "overlaid"
+        assert stderr_path.read_text(encoding="utf-8").strip() == "7"
+        raw = (unit_dir / "pid.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+        assert data["consumer"] == {"session": "abc"}
+        assert data["attempt"] == 4
+        assert data["started_at"] == result.started_at
+        assert "SECRET" not in raw
+        assert "do-not-persist" not in raw
+    finally:
+        os.kill(result.pid, signal.SIGKILL)
+        stop(unit_dir, timeout=0.05)
+    assert not (unit_dir / "pid.json").exists()
+
+
+def test_spawn_appends_logs(tmp_path: Path) -> None:
+    log = tmp_path / "worker.log"
+    log.write_text("existing\n", encoding="utf-8")
+    spec = ProcessSpec(
+        unit="append",
+        command=(PYTHON, "-c", "print('new', flush=True)"),
+        stdout_path=log,
+        probe_window=0.5,
+        probe_sleep=0.02,
+    )
+    result = spawn(spec, unit_dir=tmp_path / "state")
+    assert result.alive is False
+    assert log.read_text(encoding="utf-8") == "existing\nnew\n"
+
+
+def test_spawn_injected_opener_descriptors_close_in_parent(tmp_path: Path) -> None:
+    opened: list[object] = []
+
+    def opener(path: Path):
+        handle = path.open("a", encoding="utf-8")
+        opened.append(handle)
+        return handle
+
+    spec = ProcessSpec(
+        unit="fds",
+        command=(PYTHON, "-c", "import time; time.sleep(30)"),
+        stdout_path=tmp_path / "out.log",
+        stderr_path=tmp_path / "err.log",
+        opener=opener,
+        probe_window=0.1,
+        probe_sleep=0.02,
+    )
+    result = spawn(spec, unit_dir=tmp_path / "state")
+    try:
+        assert result.alive
+        assert len(opened) == 2
+        assert all(handle.closed for handle in opened)  # type: ignore[attr-defined]
+    finally:
+        os.kill(result.pid, signal.SIGKILL)
+
+
+def test_spawn_immediate_exit_removes_preexisting_pid_metadata(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "state"
+    _write_payload(unit_dir / "pid.json", {"pid": 999_999_999, "old": True})
+    result = spawn(
+        ProcessSpec(
+            unit="dies",
+            command=(PYTHON, "-c", "raise SystemExit(2)"),
+            probe_window=0.5,
+            probe_sleep=0.02,
+            pid_metadata={"opaque": "never-written"},
+        ),
+        unit_dir=unit_dir,
+    )
+    assert result.alive is False
+    assert not (unit_dir / "pid.json").exists()
+
+
+def test_spawn_rejects_pid_metadata_collision_before_launch(tmp_path: Path) -> None:
+    marker = tmp_path / "launched"
+    spec = ProcessSpec(
+        unit="bad-metadata",
+        command=(PYTHON, "-c", f"open({str(marker)!r}, 'w').close()"),
+        pid_metadata={"pid": 123},
+    )
+    with pytest.raises(ValueError, match="standard fields: pid"):
+        spawn(spec, unit_dir=tmp_path / "state")
+    assert not marker.exists()
+
+
+
 def test_spawn_default_unit_dir(tmp_path: Path) -> None:
     """When unit_dir is None, spec.unit is used as the directory name."""
     prev = Path.cwd()
