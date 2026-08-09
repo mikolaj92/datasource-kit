@@ -207,13 +207,16 @@ is still honoured by `is_autonomous` but is superseded by `execution`.
 ## Autonomous Worker Host
 
 `WorkerHost` is the minimal in-process lifecycle loop for sources whose work is
-self-directed rather than queue-driven. The consumer implements `WorkerIntent`
-(`plan`, `fetch`, `transform`, idempotent `persist`, and `checkpoint`); the kit
-owns checkpoint load/save, lifecycle heartbeats, idle polling, exponential
-failure backoff, and cooperative shutdown:
+self-directed rather than queue-driven. The consumer implements the
+runtime-checkable `SourceIntent` (`plan`, `fetch`, `transform`, `output`, and
+idempotent `persist`); the kit owns checkpoint load/save, lifecycle heartbeats,
+idle polling, exponential failure backoff, and cooperative shutdown. This is a
+contract integrated into `WorkerHost`, not a second host:
 
 ```python
-from datasource_kit import FileCheckpointStore, StepDecision, WorkDirective, WorkerHost
+from datasource_kit import (
+    FileCheckpointStore, SourceOutput, StepDecision, WorkDirective, WorkerHost,
+)
 
 class Source:
     def plan(self, checkpoint):
@@ -222,9 +225,13 @@ class Source:
         return StepDecision(WorkDirective.CONTINUE, {"after": checkpoint})
     def fetch(self, plan): ...
     def transform(self, payload, plan): ...
-    def persist(self, records, plan): ...  # must be idempotent
-    def checkpoint(self, records, plan):
-        return records.next_cursor  # can depend on the actual outcome
+    def output(self, records, plan):
+        return SourceOutput(
+            result={"records": records.items},
+            checkpoint=records.next_cursor,
+            directive=WorkDirective.STOP if records.final else WorkDirective.CONTINUE,
+        )
+    def persist(self, result, plan): ...  # must be idempotent
 
 host = WorkerHost(Source(), FileCheckpointStore("state/checkpoint.json"))
 host.run()  # another thread or signal handler may call host.request_stop()
@@ -234,14 +241,18 @@ The generic directives are `CONTINUE` (run the pipeline), `IDLE` (poll later),
 and `STOP` (normal terminal completion). Their mapping to source-specific
 statuses is entirely consumer-owned.
 
-The order is strictly `plan -> fetch -> transform -> persist -> checkpoint ->
-checkpoint store`. Thus the next checkpoint can be derived late from the actual
-outcome, and never advances unless persistence succeeds. Since arbitrary storage
+For `SourceIntent`, the order is strictly `plan -> fetch -> transform -> output
+-> persist -> checkpoint store`; `output` is the final, side-effect-free shaping
+stage of transformation. `STOP` and `IDLE` planning directives skip the
+entire fetch pipeline, and only one plan is requested per iteration. The output
+checkpoint never advances unless result persistence succeeds. An output may
+also carry `STOP` or `IDLE`; its result is still persisted and checkpointed
+before the directive takes effect. Since arbitrary storage
 and checkpoint files cannot share a transaction, a crash between those actions
-may replay a plan: the contract is deliberately **at least once**. The original
-`WorkerStep(plan, checkpoint)` and `None`-means-idle planner forms remain
-supported for compatibility, though new integrations should use decisions and
-a late checkpoint method. `heartbeat` is an optional callback receiving
+may replay a plan: the contract is deliberately **at least once**. The original `WorkerIntent`,
+`WorkerStep(plan, checkpoint)`, late `checkpoint` method, and `None`-means-idle
+planner forms remain supported for compatibility. New integrations should use
+`SourceIntent` and immutable `SourceOutput`. `heartbeat` is an optional callback receiving
 `WorkerHeartbeat`; callback failures are isolated from work. `max_iterations`
 supports bounded/one-shot embedding.
 

@@ -10,6 +10,8 @@ from datasource_kit import (
     BackoffPolicy,
     FileCheckpointStore,
     InMemoryCheckpointStore,
+    SourceIntent,
+    SourceOutput,
     StepDecision,
     WorkDirective,
     WorkerHost,
@@ -306,3 +308,200 @@ def test_continue_requires_late_checkpoint_for_new_intent() -> None:
     ).run(max_iterations=1)
     assert result.failures == 1
     assert result.checkpoint == "old"
+
+
+class NarrowSource:
+    def __init__(self, decisions: list[StepDecision]) -> None:
+        self.decisions = decisions
+        self.calls: list[tuple[str, object]] = []
+
+    def plan(self, checkpoint: object | None) -> StepDecision:
+        self.calls.append(("plan", checkpoint))
+        return self.decisions.pop(0)
+
+    def fetch(self, plan: object) -> object:
+        self.calls.append(("fetch", plan))
+        return {"raw": plan}
+
+    def transform(self, payload: object, plan: object) -> object:
+        self.calls.append(("transform", payload))
+        return {"items": [payload], "next": f"after-{plan}"}
+
+    def output(self, transformed: object, plan: object) -> SourceOutput:
+        self.calls.append(("output", transformed))
+        assert isinstance(transformed, dict)
+        return SourceOutput(
+            result={"items": transformed["items"]},
+            checkpoint={"cursor": transformed["next"]},
+        )
+
+    def persist(self, result: object, plan: object) -> None:
+        self.calls.append(("persist", result))
+
+
+def test_source_intent_is_runtime_checkable_and_output_is_immutable() -> None:
+    source = NarrowSource([StepDecision(WorkDirective.STOP)])
+    assert isinstance(source, SourceIntent)
+    output = SourceOutput(result={"items": []}, checkpoint={"cursor": 1})
+    with pytest.raises((AttributeError, TypeError)):
+        output.checkpoint = {"cursor": 2}  # type: ignore[misc]
+
+
+def test_source_intent_exact_pipeline_order_and_json_checkpoint() -> None:
+    source = NarrowSource([StepDecision(WorkDirective.CONTINUE, "page-1")])
+    store = InMemoryCheckpointStore({"cursor": "old"})
+
+    result = WorkerHost(source, store).run(max_iterations=1)
+
+    assert result.checkpoint == {"cursor": "after-page-1"}
+    assert store.load() == {"cursor": "after-page-1"}
+    assert [name for name, _ in source.calls] == [
+        "plan", "fetch", "transform", "output", "persist"
+    ]
+    # The produced checkpoint is accepted by the same JSON contract as the file store.
+    json.dumps(result.checkpoint)
+
+
+@pytest.mark.parametrize("directive", [WorkDirective.IDLE, WorkDirective.STOP])
+def test_source_plan_without_work_never_fetches_and_plans_once_per_iteration(
+    directive: WorkDirective,
+) -> None:
+    source = NarrowSource([StepDecision(directive, "ignored")])
+    result = WorkerHost(
+        source,
+        InMemoryCheckpointStore("old"),
+        backoff=BackoffPolicy(idle_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=1)
+
+    assert result.iterations == 1
+    assert source.calls == [("plan", "old")]
+    assert result.completed == 0
+    assert result.checkpoint == "old"
+
+
+@pytest.mark.parametrize("failing_stage", ["fetch", "transform", "output", "persist"])
+def test_source_failure_never_saves_checkpoint_and_replays_last_durable_plan(
+    failing_stage: str,
+) -> None:
+    class Failing(NarrowSource):
+        failed = False
+
+        def _fail_once(self, stage: str) -> None:
+            if failing_stage == stage and not self.failed:
+                self.failed = True
+                raise RuntimeError(stage)
+
+        def fetch(self, plan: object) -> object:
+            self._fail_once("fetch")
+            return super().fetch(plan)
+
+        def transform(self, payload: object, plan: object) -> object:
+            self._fail_once("transform")
+            return super().transform(payload, plan)
+
+        def output(self, transformed: object, plan: object) -> SourceOutput:
+            self._fail_once("output")
+            return super().output(transformed, plan)
+
+        def persist(self, result: object, plan: object) -> None:
+            self._fail_once("persist")
+            super().persist(result, plan)
+
+    source = Failing([
+        StepDecision(WorkDirective.CONTINUE, "same"),
+        StepDecision(WorkDirective.CONTINUE, "same"),
+    ])
+    store = InMemoryCheckpointStore({"cursor": "durable"})
+    result = WorkerHost(
+        source,
+        store,
+        backoff=BackoffPolicy(initial_seconds=0, maximum_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=2)
+
+    assert result.failures == 1
+    assert result.completed == 1
+    assert [call for call in source.calls if call[0] == "plan"] == [
+        ("plan", {"cursor": "durable"}),
+        ("plan", {"cursor": "durable"}),
+    ]
+    assert store.load() == {"cursor": "after-same"}
+
+
+def test_source_terminal_output_persists_before_checkpoint_and_stops() -> None:
+    class Terminal(NarrowSource):
+        def output(self, transformed: object, plan: object) -> SourceOutput:
+            self.calls.append(("output", transformed))
+            return SourceOutput(
+                result={"final": True},
+                checkpoint={"done": True},
+                directive=WorkDirective.STOP,
+            )
+
+    source = Terminal([
+        StepDecision(WorkDirective.CONTINUE, "final"),
+        StepDecision(WorkDirective.CONTINUE, "must-not-plan"),
+    ])
+    store = InMemoryCheckpointStore({"done": False})
+    result = WorkerHost(source, store).run()
+
+    assert result.iterations == 1
+    assert result.completed == 1
+    assert [name for name, _ in source.calls] == [
+        "plan", "fetch", "transform", "output", "persist"
+    ]
+    assert store.load() == {"done": True}
+
+
+def test_source_crash_after_persist_before_checkpoint_save_is_at_least_once() -> None:
+    class SaveFailsOnce(InMemoryCheckpointStore):
+        failed = False
+
+        def save(self, checkpoint: object) -> None:
+            if not self.failed:
+                self.failed = True
+                raise OSError("simulated crash boundary")
+            super().save(checkpoint)
+
+    source = NarrowSource([
+        StepDecision(WorkDirective.CONTINUE, "page"),
+        StepDecision(WorkDirective.CONTINUE, "page"),
+    ])
+    store = SaveFailsOnce({"cursor": "old"})
+    result = WorkerHost(
+        source,
+        store,
+        backoff=BackoffPolicy(initial_seconds=0, maximum_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=2)
+
+    assert result.failures == 1
+    assert result.completed == 1
+    assert [call for call in source.calls if call[0] == "plan"] == [
+        ("plan", {"cursor": "old"}),
+        ("plan", {"cursor": "old"}),
+    ]
+    assert len([call for call in source.calls if call[0] == "persist"]) == 2
+    assert store.load() == {"cursor": "after-page"}
+
+
+
+
+def test_invalid_source_output_fails_before_persistence() -> None:
+    class Invalid(NarrowSource):
+        def output(self, transformed: object, plan: object) -> SourceOutput:
+            return "invalid"  # type: ignore[return-value]
+
+    source = Invalid([StepDecision(WorkDirective.CONTINUE, "page")])
+    store = InMemoryCheckpointStore("old")
+    result = WorkerHost(
+        source,
+        store,
+        backoff=BackoffPolicy(initial_seconds=0, maximum_seconds=0),
+        sleep=lambda _: None,
+    ).run(max_iterations=1)
+
+    assert result.failures == 1
+    assert not [call for call in source.calls if call[0] == "persist"]
+    assert store.load() == "old"
