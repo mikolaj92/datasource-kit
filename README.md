@@ -6,13 +6,15 @@ explainable reports, errors, and a CLI. It refuses the **what**: which source,
 which endpoints, parsing, identity rules, completeness layer names, and grading
 verdicts.
 
-It has three honest faces:
+It has four honest faces:
 
 - a **primitives library**: `DataSource`, `IngestActor`, `Registry`, `Manifest`,
   `journal`, `results`, `window`, `ledger`, `ratelimit`, `retry`,
   `completeness`, and structural storage/artifact protocols;
 - an **opt-in runtime**: `run_ingest`, which is one composition of those
   primitives, never the only way to use the kit;
+- an **autonomous worker host**: `WorkerHost`, which wraps consumer planning,
+  fetch, transform, and persistence intent in a common lifecycle loop;
 - a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
   process supervision primitives (spawn, stop, liveness) plus a
   `DesiredStateReconciler` (desired/actual state files, generation fencing, an
@@ -140,6 +142,34 @@ A `Manifest` states how a source runs with a first-class `execution`
 (`ExecutionModel(model, step_ref)`); `model="autonomous"` marks a long-lived
 worker and requires a `SourceContract`. The older boolean `supports_autonomous`
 is still honoured by `is_autonomous` but is superseded by `execution`.
+
+## Autonomous Worker Host
+
+`WorkerHost` is the minimal in-process lifecycle loop for sources whose work is
+self-directed rather than queue-driven. The consumer implements `WorkerIntent`
+(`plan`, `fetch`, `transform`, and idempotent `persist`); the kit owns checkpoint
+load/save, lifecycle heartbeats, idle polling, exponential failure backoff, and
+cooperative shutdown:
+
+```python
+from datasource_kit import FileCheckpointStore, WorkerHost, WorkerStep
+
+class Source:
+    def plan(self, checkpoint):
+        return WorkerStep(plan={"after": checkpoint}, checkpoint="next")
+    def fetch(self, plan): ...
+    def transform(self, payload, plan): ...
+    def persist(self, records, plan): ...  # must be idempotent
+
+host = WorkerHost(Source(), FileCheckpointStore("state/checkpoint.json"))
+host.run()  # another thread or signal handler may call host.request_stop()
+```
+
+A checkpoint advances only after persistence succeeds. Since arbitrary storage
+and checkpoint files cannot share a transaction, a crash between those actions
+may replay a plan: the contract is deliberately **at least once**. `heartbeat`
+is an optional callback receiving `WorkerHeartbeat`; callback failures are
+isolated from work. `max_iterations` supports bounded/one-shot embedding.
 
 ## Install
 

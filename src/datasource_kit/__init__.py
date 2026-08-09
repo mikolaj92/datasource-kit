@@ -1,6 +1,6 @@
 """datasource-kit: a generic, dependency-free toolkit for managing many datasources.
 
-It supports three faces:
+It supports four faces:
 
 * **Ingest primitives** -- batch reference-data updaters and long-running
   scraper workers built on :class:`~datasource_kit.protocols.DataSource`,
@@ -8,6 +8,9 @@ It supports three faces:
   retry mechanics, plus the opt-in ``run_ingest`` runtime.
 * **Artifact backends** -- :class:`~datasource_kit.protocols.ArtifactStore`
   for bytes-in/ref-out payload persistence.
+* **Autonomous worker hosting** -- :class:`~datasource_kit.worker.WorkerHost`
+  owns checkpoint, heartbeat, backoff, and shutdown mechanics around consumer
+  source intent.
 * **Fleet supervision** -- :mod:`~datasource_kit.fleet` domain-blind process
   supervision primitives (spawn, stop, liveness) for long-lived worker OS
   processes.
@@ -90,9 +93,29 @@ from .results import (
 from .retry import retry, retry_decorator
 from .runtime import run_ingest
 from .window import DayWindow, WindowIterator, split_range_into_days
+from .worker import (
+    BackoffPolicy,
+    CheckpointStore,
+    FileCheckpointStore,
+    InMemoryCheckpointStore,
+    WorkerHeartbeat,
+    WorkerHost,
+    WorkerIntent,
+    WorkerRun,
+    WorkerStep,
+)
 
 __all__ = [
     "ArtifactStore",
+    "WorkerStep",
+    "WorkerRun",
+    "WorkerIntent",
+    "WorkerHost",
+    "WorkerHeartbeat",
+    "InMemoryCheckpointStore",
+    "FileCheckpointStore",
+    "CheckpointStore",
+    "BackoffPolicy",
     "CompletenessReport",
     "Cursor",
     "DESIRED_DISABLED",
