@@ -13,18 +13,20 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 __all__ = [
     "BackoffPolicy",
     "CheckpointStore",
     "FileCheckpointStore",
     "InMemoryCheckpointStore",
+    "SourceIntent",
+    "SourceOutput",
     "StepDecision",
     "WorkDirective",
     "WorkerHeartbeat",
@@ -66,6 +68,43 @@ class StepDecision:
 
     directive: WorkDirective
     work: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOutput:
+    """Immutable outcome of one source operation.
+
+    ``result`` is the generic payload persisted by the intent.  ``checkpoint``
+    becomes durable only after that persistence succeeds.  ``directive`` tells
+    the host what to do after the successful operation; it never skips the
+    operation that produced this output.
+    """
+
+    result: Mapping[str, object]
+    checkpoint: object
+    directive: WorkDirective = WorkDirective.CONTINUE
+
+
+@runtime_checkable
+class SourceIntent(Protocol):
+    """Narrow source contract hosted by the existing :class:`WorkerHost`.
+
+    Exactly one plan is requested per iteration.  ``IDLE`` and ``STOP`` plans
+    do not fetch.  A continuing plan executes ``fetch``, ``transform``, and
+    ``output`` once; the host then calls ``persist`` with ``SourceOutput.result``
+    before saving ``SourceOutput.checkpoint``.  ``output`` is the final shaping
+    part of transformation, not a persistence side effect.
+    """
+
+    def plan(self, checkpoint: object | None) -> StepDecision: ...
+
+    def fetch(self, plan: object) -> object: ...
+
+    def transform(self, payload: object, plan: object) -> object: ...
+
+    def output(self, transformed: object, plan: object) -> SourceOutput: ...
+
+    def persist(self, result: Mapping[str, object], plan: object) -> None: ...
 
 
 @runtime_checkable
@@ -210,7 +249,7 @@ class WorkerHost:
 
     def __init__(
         self,
-        intent: WorkerIntent,
+        intent: SourceIntent | WorkerIntent,
         checkpoints: CheckpointStore,
         *,
         backoff: BackoffPolicy | None = None,
@@ -282,21 +321,42 @@ class WorkerHost:
                     self._emit("working", checkpoint, completed, failures, consecutive)
                     payload = self.intent.fetch(plan)
                     transformed = self.intent.transform(payload, plan)
-                    self.intent.persist(transformed, plan)
-                    checkpoint_method = getattr(self.intent, "checkpoint", None)
-                    if checkpoint_method is not None:
-                        next_checkpoint = checkpoint_method(transformed, plan)
-                    elif legacy_checkpoint is not _MISSING:
-                        next_checkpoint = legacy_checkpoint
+                    output_method = getattr(self.intent, "output", None)
+                    output_directive = WorkDirective.CONTINUE
+                    if output_method is not None:
+                        output = output_method(transformed, plan)
+                        if not isinstance(output, SourceOutput):
+                            raise TypeError("intent.output() must return SourceOutput")
+                        if not isinstance(output.result, Mapping):
+                            raise TypeError("SourceOutput.result must be a mapping")
+                        if not isinstance(output.directive, WorkDirective):
+                            raise TypeError(
+                                "SourceOutput.directive must be a WorkDirective"
+                            )
+                        self.intent.persist(output.result, plan)
+                        next_checkpoint = output.checkpoint
+                        output_directive = output.directive
                     else:
-                        raise TypeError(
-                            "intent.checkpoint() is required for a CONTINUE decision"
-                        )
+                        self.intent.persist(transformed, plan)
+                        checkpoint_method = getattr(self.intent, "checkpoint", None)
+                        if checkpoint_method is not None:
+                            next_checkpoint = checkpoint_method(transformed, plan)
+                        elif legacy_checkpoint is not _MISSING:
+                            next_checkpoint = legacy_checkpoint
+                        else:
+                            raise TypeError(
+                                "intent.checkpoint() is required for a CONTINUE decision"
+                            )
                     self.checkpoints.save(next_checkpoint)
                     checkpoint = next_checkpoint
                     completed += 1
                     consecutive = 0
                     self._emit("checkpointed", checkpoint, completed, failures, consecutive)
+                    if output_directive is WorkDirective.STOP:
+                        break
+                    if output_directive is WorkDirective.IDLE:
+                        self._emit("idle", checkpoint, completed, failures, consecutive)
+                        self._wait(self.backoff.idle_seconds)
                 except Exception as exc:  # consumer boundary: back off and retry
                     failures += 1
                     consecutive += 1
