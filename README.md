@@ -252,15 +252,29 @@ summary = backend.execute(
 The callback is invoked exactly once. Its return value is returned unchanged
 (the same object), and its exception is propagated unchanged. `inputs` and
 `metadata` are opaque, caller-owned JSON-compatible diagnostics: the kit neither
-validates nor interprets their vocabulary. A custom backend may add observation
-or durable recording, but concurrency and recording policy are its own
-responsibility.
+validates nor interprets their vocabulary. Install the optional Fala integration to
+durably record a callback against an existing Fala run:
+
+```python
+from datasource_kit.adapters.fala import FalaExecutionBackend
+
+backend = FalaExecutionBackend("journal.sqlite")
+summary = backend.execute(request, perform_step)
+```
+
+This is a thin adapter over Fala 0.7.21's public `record_in_process` API:
+`run_id`, `execution_id` (as Fala's `process_id`), `inputs`, `metadata`, and the
+callback are forwarded unchanged. Fala owns validation, recording, exact-once
+callback invocation, and return/exception semantics. The caller still creates
+and finalizes the run and owns IDs, retries, and result lifetime.
+
+A custom backend may add observation or durable recording, but concurrency and
+recording policy are its own responsibility.
 
 This boundary intentionally does **not** create or finalize runs, mint IDs,
 retry, checkpoint, persist business data, clean results, or manage result
-lifetimes. There is no Fala execution adapter until Fala provides a supported
-durable in-process recording API; the existing optional Fala artifact adapter
-is separate.
+lifetimes. The optional Fala execution and artifact adapters are separate; neither
+is imported by the dependency-free core.
 
 ## Install
 
@@ -273,7 +287,7 @@ Core has no third-party runtime dependencies. Optional integrations are lazy:
 
 ```bash
 pip install "datasource-kit[profiles]"   # YAML profile loading
-pip install "datasource-kit[fala]"       # Fala artifact adapter
+pip install "datasource-kit[fala]"       # Fala execution + artifact adapters
 ```
 
 ## Minimal Batch Usage
