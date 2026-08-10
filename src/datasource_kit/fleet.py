@@ -15,12 +15,15 @@ Boundaries
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
 import socket
 import subprocess
+import sys
 import time
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -38,6 +41,8 @@ __all__ = [
     "spawn_process",
     "stop",
     "stop_process",
+    "clear_process_tombstone",
+    "ProcessTombstoneError",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
     "ReconcileOutcome",
@@ -109,6 +114,9 @@ class ProcessSpec:
     generation_env: str | None = GENERATION_ENV
     pid_metadata: Mapping[str, object] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _validate_unit(self.unit)
+
 
 @dataclass(slots=True, frozen=True)
 class SpawnResult:
@@ -117,6 +125,8 @@ class SpawnResult:
     pid: int
     started_at: float
     alive: bool
+    token: str | None = None
+    generation: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -158,7 +168,27 @@ class Liveness:
 _PID_FILE = "pid.json"
 _STOP_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = signal.SIGKILL
-_DEFAULT_TIMEOUT = 5.0  # seconds before escalating to SIGKILL
+_DEFAULT_TIMEOUT = 5.0
+_OWNED_HANDLES: dict[str, subprocess.Popen[Any]] = {}
+
+
+def _validate_unit(unit: str) -> str:
+    """Reject unit ids that could escape the reconciler's root."""
+    if (not isinstance(unit, str) or not unit or unit in {".", ".."}
+            or Path(unit).name != unit or "\x00" in unit):
+        raise ValueError(f"unit must be one safe path component, got {unit!r}")
+    return unit
+
+
+def _ensure_unit_dir(unit_dir: str | Path) -> Path:
+    """Create a real unit directory, refusing a symlink at the trust boundary."""
+    directory = Path(unit_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    import stat
+    mode = os.lstat(directory).st_mode
+    if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+        raise ProcessTombstoneError("unit directory must be a real directory")
+    return directory
 
 
 def _pid_path(unit_dir: str | Path) -> Path:
@@ -280,203 +310,187 @@ def _pid_alive(pid: int) -> bool:
 
 
 def spawn_process(
-    command: Sequence[str],
-    *,
-    cwd: str | None = None,
-    env: Mapping[str, str] | None = None,
-    stdout: int | IO[str] | None = None,
-    stderr: int | IO[str] | None = None,
-    probe_window: float = _PROBE_WINDOW,
+    command: Sequence[str], *, cwd: str | None = None,
+    env: Mapping[str, str] | None = None, stdout: int | IO[str] | None = None,
+    stderr: int | IO[str] | None = None, probe_window: float = _PROBE_WINDOW,
     probe_sleep: float = _PROBE_SLEEP,
+    _persist: Callable[[int, float, str], None] | None = None,
+    _generation: int | None = None, _token: str | None = None,
 ) -> SpawnResult:
-    """Spawn a detached child process and probe for immediate exit.
+    """Launch through an ACK gate; the consumer cannot exec before provenance.
 
-    Layout-agnostic core of :func:`spawn`: it starts the process in its own
-    session (so a later :func:`stop_process` can signal the whole group), runs
-    the fail-closed immediate-exit probe, and returns the outcome. It writes
-    NO ``pid.json`` -- pid metadata and its on-disk layout are the caller's
-    concern.
-
-    Parameters
-    ----------
-    command:
-        Executable path and arguments (passed to ``subprocess.Popen``).
-    cwd:
-        Working directory for the child, or ``None`` to inherit.
-    env:
-        Environment for the child, or ``None`` to inherit the parent's.
-    stdout, stderr:
-        Destinations for the child's streams -- a file descriptor, an open
-        file object, or ``None`` (defaults to ``subprocess.DEVNULL``). Lets a
-        consumer redirect the child to its own log without the kit owning
-        log paths.
-    probe_window:
-        Total seconds to watch for an immediate exit.
-    probe_sleep:
-        Seconds to sleep between exit probes.
-
-    Returns
-    -------
-    A :class:`SpawnResult`. ``alive=False`` means the child exited within the
-    probe window (a failed spawn), never "running and then crashed".
+    The private ``_persist`` hook is intentionally only used by :func:`spawn`.
+    Without it this remains a compatibility primitive and ACKs immediately.
     """
     child_env = dict(os.environ) if env is None else dict(env)
-    resolved_out: int | IO[str] = subprocess.DEVNULL if stdout is None else stdout
-    resolved_err: int | IO[str] = subprocess.DEVNULL if stderr is None else stderr
-
+    token = _token or uuid.uuid4().hex
+    parent_fd, child_fd = socket.socketpair()
+    child_env["DATASOURCE_KIT_ACK_FD"] = str(child_fd.fileno())
+    child_env["DATASOURCE_KIT_EXEC_COMMAND"] = json.dumps(list(command))
     proc = subprocess.Popen(
-        list(command),
-        cwd=cwd,
-        env=child_env,
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=resolved_out,
-        stderr=resolved_err,
+        [sys.executable, "-m", "datasource_kit._exec_gate"], cwd=cwd,
+        env=child_env, start_new_session=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL if stdout is None else stdout,
+        stderr=subprocess.DEVNULL if stderr is None else stderr,
+        pass_fds=(child_fd.fileno(),),
     )
-
+    child_fd.close()
     started_at = time.time()
+    try:
+        parent_fd.settimeout(max(probe_window, 1.0))
+        if parent_fd.recv(6) != b"READY\n":
+            return SpawnResult(proc.pid, started_at, False)
+        if _persist is not None:
+            _persist(proc.pid, started_at, token)
+            _OWNED_HANDLES[token] = proc
+        parent_fd.sendall(b"ACK\n")
+    except BaseException:
+        # Closing the channel makes a pre-ACK wrapper exit harmlessly.
+        parent_fd.close()
+        try: proc.wait(timeout=1)
+        except subprocess.TimeoutExpired: pass
+        raise
+    finally:
+        parent_fd.close()
     deadline = started_at + probe_window
-    alive = True
     while time.time() < deadline:
-        ret = proc.poll()
-        if ret is not None:
-            alive = False
-            break
+        if proc.poll() is not None:
+            if _OWNED_HANDLES.get(token) is proc:
+                _OWNED_HANDLES.pop(token, None)
+            return SpawnResult(proc.pid, started_at, False, token, _generation)
         time.sleep(probe_sleep)
+    return SpawnResult(proc.pid, started_at, True, token, _generation)
 
-    return SpawnResult(pid=proc.pid, started_at=started_at, alive=alive)
 
-
-def spawn(
-    spec: ProcessSpec,
-    *,
-    unit_dir: str | Path | None = None,
-    generation: int | None = None,
-) -> SpawnResult:
-    """Start a worker process described by *spec*.
-
-    Consumer-owned log destinations are opened in append mode (or through the
-    injected opener) and closed in the parent as soon as ``Popen`` and probing
-    finish. Environment overlays and optional generation injection affect only
-    the child; neither environment is serialized. ``pid.json`` is atomically
-    persisted only after the child survives the configured probe window.
-    """
-    resolved = Path(unit_dir) if unit_dir is not None else Path(spec.unit)
-    resolved.mkdir(parents=True, exist_ok=True)
-    payload_template = _pid_payload(
-        spec, SpawnResult(pid=0, started_at=0.0, alive=False)
-    )
-
+def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None,
+          generation: int | None = None) -> SpawnResult:
+    """First-launch-only spawn with durable, ACK-gated process provenance."""
+    resolved = _ensure_unit_dir(unit_dir if unit_dir is not None else spec.unit)
+    pid_path = _pid_path(resolved)
+    # Presence is the fence: never parse, probe, clean, adopt, or infer safety.
+    try:
+        os.lstat(pid_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ProcessTombstoneError("pid metadata unreadable; operator verification required") from exc
+    else:
+        raise ProcessTombstoneError("process tombstone exists; operator verification required")
+    template = _pid_payload(spec, SpawnResult(0, 0.0, False))
+    token = uuid.uuid4().hex
+    # Establish the durable fence before Popen. A crash at any later boundary
+    # leaves launch intent, so a restarted supervisor cannot launch again.
+    intent = dict(template)
+    intent.update(pid=None, started_at=None, unit=spec.unit,
+                  generation=generation, token=token, incarnation=token,
+                  status="launch_intent")
+    try:
+        fd = os.open(pid_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(intent, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(resolved, os.O_RDONLY)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
+    except BaseException:
+        # Presence (including a partial file) remains a conservative fence.
+        raise
     child_env = dict(os.environ) if spec.env is None else dict(spec.env)
     child_env.update(spec.env_overlay)
     if generation is not None and spec.generation_env is not None:
         child_env[spec.generation_env] = str(generation)
-
     open_stream = spec.opener or _append_opener
     with ExitStack() as stack:
-        stdout = (
-            stack.enter_context(open_stream(Path(spec.stdout_path)))
-            if spec.stdout_path is not None
-            else None
-        )
-        stderr = (
-            stack.enter_context(open_stream(Path(spec.stderr_path)))
-            if spec.stderr_path is not None
-            else None
-        )
-        result = spawn_process(
-            spec.command,
-            cwd=spec.cwd,
-            env=child_env,
-            stdout=stdout,
-            stderr=stderr,
-            probe_window=spec.probe_window,
-            probe_sleep=spec.probe_sleep,
-        )
-
-    if result.alive:
-        payload = dict(payload_template)
-        payload.update(pid=result.pid, started_at=result.started_at)
-        _write_pid(resolved, payload)
-    else:
-        # Do not leave pre-existing stale metadata suggesting this failed child
-        # is alive.
-        _clean_pid(resolved)
-    return result
+        out = stack.enter_context(open_stream(Path(spec.stdout_path))) if spec.stdout_path else None
+        err = stack.enter_context(open_stream(Path(spec.stderr_path))) if spec.stderr_path else None
+        def persist(pid: int, started: float, token: str) -> None:
+            payload = dict(template)
+            payload.update(pid=pid, started_at=started, unit=spec.unit,
+                           generation=generation, token=token,
+                           incarnation=token, status="running_or_unknown")
+            _write_pid(resolved, payload)
+        return spawn_process(spec.command, cwd=spec.cwd, env=child_env,
+            stdout=out, stderr=err, probe_window=spec.probe_window,
+            probe_sleep=spec.probe_sleep, _persist=persist,
+            _generation=generation, _token=token)
 
 
 def stop_process(pid: int, *, timeout: float = _DEFAULT_TIMEOUT) -> StopOutcome:
-    """Stop a process group identified by *pid*, escalating SIGTERM -> SIGKILL.
-
-    Layout-agnostic core of :func:`stop`: it signals the process group, waits
-    up to *timeout* seconds for graceful exit, then escalates to SIGKILL. It
-    performs NO pid-file I/O -- reading the pid and cleaning up its on-disk
-    record are the caller's concern.
-
-    Returns a :class:`StopOutcome`:
-
-    - ``signalled=False, killed=False`` -- the pid was already dead, or it
-      vanished before SIGTERM could land (nothing to signal).
-    - ``signalled=True, killed=False`` -- SIGTERM was delivered and the
-      process exited within *timeout*.
-    - ``signalled=True, killed=True`` -- SIGTERM did not suffice, so SIGKILL
-      was delivered.
-    """
-    if not _pid_alive(pid):
-        return StopOutcome(pid=pid, signalled=False, killed=False)
-
-    try:
-        os.killpg(os.getpgid(pid), _STOP_SIGNAL)
-    except (ProcessLookupError, PermissionError, OSError):
-        # Process already gone; nothing to signal.
-        return StopOutcome(pid=pid, signalled=False, killed=False)
-
-    # Wait for graceful exit.
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _pid_alive(pid):
-            return StopOutcome(pid=pid, signalled=True, killed=False)
-        time.sleep(0.1)
-
-    # Escalate to SIGKILL.
-    killed = False
-    try:
-        os.killpg(os.getpgid(pid), _KILL_SIGNAL)
-        killed = True
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-    return StopOutcome(pid=pid, signalled=True, killed=killed)
-
-
-def stop(
-    unit_dir: str | Path,
-    *,
-    timeout: float = _DEFAULT_TIMEOUT,
-) -> StopResult:
-    """Stop a supervised process identified by *unit_dir*.
-
-    Reads the pid from *unit_dir*'s ``pid.json``, delegates the SIGTERM ->
-    SIGKILL escalation to :func:`stop_process`, then cleans up the pid file.
-    A stale ``pid.json`` (referencing a dead or recycled pid) is cleaned up
-    silently and reported via ``cleaned=True`` -- which mirrors the
-    "nothing was signalled" outcome.
-    """
-    data = _read_pid(unit_dir)
-    if data is None:
-        raise FileNotFoundError(f"no pid.json in {unit_dir}")
-
-    pid = int(data["pid"])
-
-    outcome = stop_process(pid, timeout=timeout)
-
-    _clean_pid(unit_dir)
-    return StopResult(
-        pid=outcome.pid,
-        signalled=outcome.signalled,
-        killed=outcome.killed,
-        cleaned=not outcome.signalled,
+    """Refuse numeric-PID signalling; identity cannot be proven by a PID."""
+    raise ProcessTombstoneError(
+        "numeric PID signalling is disabled; operator verification required"
     )
+
+
+def stop(unit_dir: str | Path, *, timeout: float = _DEFAULT_TIMEOUT) -> StopResult:
+    """Request cooperative TERM only through this supervisor's live handle.
+
+    Provenance is retained regardless of the outcome. There is no escalation.
+    """
+    path = _pid_path(unit_dir)
+    data = read_json(path)
+    if data is None:
+        raise ProcessTombstoneError("pid metadata absent or unreadable")
+    token = data.get("token")
+    pid = data.get("pid")
+    handle = _OWNED_HANDLES.get(token) if isinstance(token, str) else None
+    signalled = False
+    if handle is not None and handle.pid == pid and handle.poll() is None:
+        handle.terminate()  # Popen capability, never a reconstructed numeric PID
+        signalled = True
+    elif handle is not None:
+        # Retire dead or mismatched capabilities; they must never accumulate or
+        # later authorize a PID-reuse signal.
+        _OWNED_HANDLES.pop(token, None)
+    data["stop_requested"] = True
+    data["operator_verification_required"] = True
+    data["status"] = "stop_requested_or_unknown"
+    write_json_atomic(path, data)
+    return StopResult(int(pid or 0), signalled, False, False)
+
+
+def clear_process_tombstone(
+    unit_dir: str | Path, *, unit: str, generation: int, token: str,
+    workload_fully_gone_asserted: bool, operator: str = "operator",
+) -> Path:
+    """Operator-only clearance after external proof the whole workload is gone."""
+    if not workload_fully_gone_asserted:
+        raise ProcessTombstoneError("explicit workload-gone assertion is required")
+    directory = Path(unit_dir)
+    with _unit_lock(directory):
+        path = _pid_path(directory)
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as exc:
+            raise ProcessTombstoneError("tombstone absent or unreadable") from exc
+        import stat
+        if not stat.S_ISREG(mode):
+            raise ProcessTombstoneError("tombstone is not a regular file")
+        data = read_json(path)
+        if data is None:
+            raise ProcessTombstoneError("tombstone absent or unreadable")
+        if (data.get("unit"), data.get("generation"), data.get("token")) != (unit, generation, token):
+            raise ProcessTombstoneError("unit/generation/token do not exactly match")
+        audit = directory / "process-clearance.audit.jsonl"
+        record = {"unit": unit, "generation": generation, "token": token,
+                  "operator": operator, "asserted_workload_fully_gone": True,
+                  "cleared_at": time.time()}
+        audit_fd = os.open(audit, os.O_WRONLY | os.O_APPEND | os.O_CREAT |
+                           getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(audit_fd, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        path.unlink()
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        _OWNED_HANDLES.pop(token, None)
+        return audit
 
 
 def liveness(unit_dir: str | Path) -> Liveness:
@@ -548,6 +562,10 @@ _CORE_STATE_KEYS = frozenset(
 )
 
 
+class ProcessTombstoneError(RuntimeError):
+    """An existing process provenance record requires operator clearance."""
+
+
 class SupervisorLockError(RuntimeError):
     """Raised when the exclusive supervisor lock is held by a live owner."""
 
@@ -578,15 +596,34 @@ class ReconcileOutcome:
     generation: int
     pid: int | None
     alive: bool
+    degraded_reason: str | None = None
 
 
 def write_json_atomic(path: str | Path, payload: Mapping[str, Any]) -> None:
-    """Atomically write *payload* as JSON to *path* (tmp file + ``replace``)."""
+    """Durably replace JSON without following a predictable temp symlink."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
+    encoded = json.dumps(payload, indent=2, sort_keys=True).encode()
+    tmp = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_json(path: str | Path) -> dict[str, Any] | None:
@@ -797,6 +834,19 @@ def _default_stop_action(unit_dir: Path) -> StopResult:
     return stop(unit_dir)
 
 
+@contextmanager
+def _unit_lock(unit_dir: Path) -> Iterator[None]:
+    """Serialize state/tombstone transitions for one unit."""
+    unit_dir = _ensure_unit_dir(unit_dir)
+    path = unit_dir / ".process.lock"
+    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 class DesiredStateReconciler:
     """Converge a fleet of units toward a consumer-declared desired state.
 
@@ -833,7 +883,7 @@ class DesiredStateReconciler:
         return self._root
 
     def unit_dir(self, unit: str) -> Path:
-        return self._root / unit
+        return self._root / _validate_unit(unit)
 
     def state_file(self, unit: str) -> Path:
         return self.unit_dir(unit) / _STATE_FILE
@@ -918,81 +968,70 @@ class DesiredStateReconciler:
         return merged
 
     def observe_actual(self, unit: str) -> str:
-        """Return ``"running"`` or ``"stopped"``; clean up a stale pid file."""
+        """Observe conservatively; every tombstone means running-or-unknown."""
+        path = _pid_path(self.unit_dir(unit))
         try:
-            live = liveness(self.unit_dir(unit))
+            os.lstat(path)
         except FileNotFoundError:
             return "stopped"
-        if live.state == "running":
-            return "running"
-        # Stale pid.json (process gone) -> clean so the unit reads as stopped.
-        _clean_pid(self.unit_dir(unit))
-        return "stopped"
+        except OSError:
+            return "unknown"
+        return "running"  # never use PID liveness to authorize replacement
 
     # -- reconcile ---------------------------------------------------------
 
-    def reconcile_unit(
-        self, spec: ProcessSpec, policy: ReconcilePolicy
-    ) -> ReconcileOutcome:
-        """Converge a single unit toward the desired state (no lock).
-
-        A ``paused`` unit is a *warm* keep-alive: the default policy wants it
-        running (:func:`honor_desired_state`), so it flows through the normal
-        want-running path below -- spawned if down (reboot-warm), a noop if
-        already up (never killed by its desired state).  The "idle while
-        running" half is the consumer's drive loop reading the ``paused`` label;
-        the reconciler only keeps the process alive.
-        """
+    def reconcile_unit(self, spec: ProcessSpec, policy: ReconcilePolicy) -> ReconcileOutcome:
+        """Reconcile without restart/adoption; tombstones permanently fail closed."""
         unit = spec.unit
-        state = self.load_state(unit)
-
-        want_running = policy(state)
-        actual = self.observe_actual(unit)
-        state["actual"] = actual
-        if want_running and actual != "running":
-            generation = int(state["generation"]) + 1
-            result = self._spawn(spec, generation, self.unit_dir(unit))
-            state["generation"] = generation
-            state["pid"] = result.pid if result.alive else None
-            state["actual"] = "running" if result.alive else "stopped"
-            self._save_state(state)
-            return ReconcileOutcome(
-                unit=unit,
-                action="spawned",
-                desired=str(state["desired"]),
-                actual=str(state["actual"]),
-                generation=generation,
-                pid=state["pid"],
-                alive=result.alive,
-            )
-
-        if not want_running and actual == "running":
-            self._stop(self.unit_dir(unit))
-            state["pid"] = None
+        with _unit_lock(self.unit_dir(unit)):
+            state = self.load_state(unit)
+            want_running = policy(state)
+            actual = self.observe_actual(unit)
+            state["actual"] = actual
+            reason: str | None = None
+            if actual != "stopped":
+                reason = "process_tombstone_operator_verification_required"
+                state["degraded_reason"] = reason
+                state["operator_verification_required"] = True
+                if not want_running:
+                    try:
+                        outcome = stop(self.unit_dir(unit))
+                        if outcome.signalled:
+                            state["stop_requested"] = True
+                    except ProcessTombstoneError:
+                        pass
+                self._save_state(state)
+                pid = state.get("pid")
+                return ReconcileOutcome(unit, "noop", str(state["desired"]),
+                    actual, int(state["generation"]), pid if isinstance(pid, int) else None,
+                    actual == "running", reason)
+            if want_running:
+                generation = int(state["generation"]) + 1
+                try:
+                    result = self._spawn(spec, generation, self.unit_dir(unit))
+                except ProcessTombstoneError:
+                    reason = "process_tombstone_operator_verification_required"
+                    state.update(actual="unknown", degraded_reason=reason,
+                                 operator_verification_required=True)
+                    self._save_state(state)
+                    return ReconcileOutcome(unit, "noop", str(state["desired"]),
+                        "unknown", int(state["generation"]), None, False, reason)
+                # Metadata is durable before exec; never erase it on early exit.
+                state.update(generation=generation, pid=result.pid,
+                             actual="running" if result.alive else "unknown",
+                             process_token=result.token,
+                             operator_verification_required=not result.alive)
+                if not result.alive:
+                    reason = "leader_exited_operator_verification_required"
+                    state["degraded_reason"] = reason
+                self._save_state(state)
+                return ReconcileOutcome(unit, "spawned", str(state["desired"]),
+                    str(state["actual"]), generation, result.pid, result.alive, reason)
+            # Disable with no provenance is only a state label; it deletes nothing.
             state["actual"] = "stopped"
             self._save_state(state)
-            return ReconcileOutcome(
-                unit=unit,
-                action="stopped",
-                desired=str(state["desired"]),
-                actual="stopped",
-                generation=int(state["generation"]),
-                pid=None,
-                alive=False,
-            )
-
-        # Already converged: persist the observed actual and report no-op.
-        self._save_state(state)
-        pid = state.get("pid")
-        return ReconcileOutcome(
-            unit=unit,
-            action="noop",
-            desired=str(state["desired"]),
-            actual=actual,
-            generation=int(state["generation"]),
-            pid=pid if isinstance(pid, int) else None,
-            alive=actual == "running",
-        )
+            return ReconcileOutcome(unit, "noop", str(state["desired"]),
+                "stopped", int(state["generation"]), None, False)
 
     def _reconcile_all(
         self, specs: Iterable[ProcessSpec], policy: ReconcilePolicy
@@ -1110,7 +1149,7 @@ class WorkerControlPlane:
     def observe_unit(self, unit: str) -> UnitObservation:
         """Snapshot a single declared unit (fails closed on unknown units).
 
-        This is a **read-only** view: it classifies liveness straight from
+        This is a **read-only** view: it conservatively observes the presence of
         ``pid.json`` and never cleans a stale pid file.  Pruning stale metadata
         is the supervisor's job, done under the supervisor lock during reconcile
         -- an out-of-process observer (e.g. the FastAPI adapter) must not race
@@ -1120,16 +1159,24 @@ class WorkerControlPlane:
         """
         self._require(unit)
         state = self._reconciler.load_state(unit)
+        path = _pid_path(self._reconciler.unit_dir(unit))
         try:
-            live = liveness(self._reconciler.unit_dir(unit))
+            os.lstat(path)
         except FileNotFoundError:
-            live = None
-        if live is not None and live.state == "running":
-            actual, pid = "running", live.pid
-        else:
-            # No pid file, or a stale one (process gone): report stopped
-            # without touching disk.
             actual, pid = "stopped", None
+        except OSError:
+            actual, pid = "unknown", None
+        else:
+            # A tombstone never proves that the whole workload is gone. Expose
+            # a live leader when observable, otherwise preserve uncertainty.
+            try:
+                live = liveness(self._reconciler.unit_dir(unit))
+            except (FileNotFoundError, OSError):
+                live = None
+            if live is not None and live.state == "running":
+                actual, pid = "running", live.pid
+            else:
+                actual, pid = "unknown", None
         heartbeat = {
             key: value for key, value in state.items() if key not in _CORE_STATE_KEYS
         }

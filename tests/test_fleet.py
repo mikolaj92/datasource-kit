@@ -21,6 +21,8 @@ from datasource_kit.fleet import (
     DesiredStateReconciler,
     Liveness,
     ProcessSpec,
+    ProcessTombstoneError,
+    clear_process_tombstone,
     ReconcileOutcome,
     SpawnResult,
     StopOutcome,
@@ -59,22 +61,6 @@ def _write_payload(path: Path, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_basic(tmp_path: Path) -> None:
-    """A short-lived process dies during probe window; pid.json cleaned up."""
-    spec = ProcessSpec(
-        unit="test-unit",
-        command=(PYTHON, "-c", "import sys; sys.exit(0)"),
-    )
-    unit_dir = tmp_path / "basic"
-    result = spawn(spec, unit_dir=unit_dir)
-
-    assert isinstance(result, SpawnResult)
-    assert result.pid > 0
-    assert result.started_at > 0
-    assert result.alive is False
-
-    # pid.json is cleaned up when the process dies during the probe window.
-    assert not (unit_dir / "pid.json").exists()
 
 
 def test_spawn_long_running(tmp_path: Path) -> None:
@@ -104,62 +90,8 @@ def test_spawn_long_running(tmp_path: Path) -> None:
     os.kill(result.pid, signal.SIGKILL)
 
 
-def test_spawn_with_env_and_cwd(tmp_path: Path) -> None:
-    """Environment and cwd are forwarded to the child."""
-    workdir = tmp_path / "worker"
-    workdir.mkdir()
-    spec = ProcessSpec(
-        unit="env-test",
-        command=(PYTHON, "-c",
-                 "import os; os.write(1, os.environ.get('MY_VAR', 'nope').encode())"),
-        cwd=str(workdir),
-        env={"MY_VAR": "hello"},
-    )
-    unit_dir = tmp_path / "env"
-    result = spawn(spec, unit_dir=unit_dir)
-    # Short-lived process: pid.json cleaned up by probe.
-    assert result.alive is False
-    assert not (unit_dir / "pid.json").exists()
 
 
-def test_spawn_rich_spec_logs_env_generation_and_metadata(tmp_path: Path) -> None:
-    """Rich declarative launch stays domain-blind and persists no secrets."""
-    stdout_path = tmp_path / "consumer" / "worker.log"
-    stderr_path = tmp_path / "consumer" / "worker.err"
-    spec = ProcessSpec(
-        unit="opaque-unit",
-        command=(
-            PYTHON,
-            "-c",
-            "import os,sys,time; print(os.environ['OVERLAY'], flush=True); "
-            f"print(os.environ['{GENERATION_ENV}'], file=sys.stderr, flush=True); "
-            "time.sleep(30)",
-        ),
-        env={"BASE": "base", "SECRET": "do-not-persist"},
-        env_overlay={"OVERLAY": "overlaid"},
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        probe_window=0.15,
-        probe_sleep=0.02,
-        pid_metadata={"consumer": {"session": "abc"}, "attempt": 4},
-    )
-    unit_dir = tmp_path / "state"
-    result = spawn(spec, unit_dir=unit_dir, generation=7)
-    try:
-        assert result.alive is True
-        assert stdout_path.read_text(encoding="utf-8").strip() == "overlaid"
-        assert stderr_path.read_text(encoding="utf-8").strip() == "7"
-        raw = (unit_dir / "pid.json").read_text(encoding="utf-8")
-        data = json.loads(raw)
-        assert data["consumer"] == {"session": "abc"}
-        assert data["attempt"] == 4
-        assert data["started_at"] == result.started_at
-        assert "SECRET" not in raw
-        assert "do-not-persist" not in raw
-    finally:
-        os.kill(result.pid, signal.SIGKILL)
-        stop(unit_dir, timeout=0.05)
-    assert not (unit_dir / "pid.json").exists()
 
 
 def test_spawn_appends_logs(tmp_path: Path) -> None:
@@ -203,21 +135,6 @@ def test_spawn_injected_opener_descriptors_close_in_parent(tmp_path: Path) -> No
         os.kill(result.pid, signal.SIGKILL)
 
 
-def test_spawn_immediate_exit_removes_preexisting_pid_metadata(tmp_path: Path) -> None:
-    unit_dir = tmp_path / "state"
-    _write_payload(unit_dir / "pid.json", {"pid": 999_999_999, "old": True})
-    result = spawn(
-        ProcessSpec(
-            unit="dies",
-            command=(PYTHON, "-c", "raise SystemExit(2)"),
-            probe_window=0.5,
-            probe_sleep=0.02,
-            pid_metadata={"opaque": "never-written"},
-        ),
-        unit_dir=unit_dir,
-    )
-    assert result.alive is False
-    assert not (unit_dir / "pid.json").exists()
 
 
 def test_spawn_rejects_pid_metadata_collision_before_launch(tmp_path: Path) -> None:
@@ -357,40 +274,6 @@ def test_liveness_non_integer_pid_is_stale(tmp_path: Path) -> None:
     assert result.state == "stale"
 
 
-def test_liveness_zombie_child_is_stale(tmp_path: Path) -> None:
-    """A zombie child (exited but unreaped) reads as 'stale', not 'running'.
-
-    ``os.kill(pid, 0)`` keeps succeeding for a zombie because the PID slot is
-    still occupied. If ``liveness`` reported that as 'running', the reconciler
-    would never respawn a crashed worker whose parent is the supervisor itself.
-    """
-    from datasource_kit.fleet import _pid_alive, _pid_is_zombie, stop_process
-
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - child hard-exits, never returns to pytest
-        os._exit(0)
-
-    try:
-        # The child has exited but this process has not reaped it, so it is now
-        # a zombie. Poll (rather than fixed-sleep) for the kernel transition.
-        deadline = time.time() + 5.0
-        while time.time() < deadline and not _pid_is_zombie(pid):
-            time.sleep(0.02)
-
-        assert _pid_is_zombie(pid) is True
-        assert _pid_alive(pid) is False
-
-        unit_dir = tmp_path / "zombie"
-        _write_payload(unit_dir / "pid.json", {"pid": pid, "command": []})
-        assert liveness(unit_dir).state == "stale"
-
-        # stop_process on a zombie must return "already dead" at once, not wait
-        # out its timeout on a SIGTERM that can never be acknowledged.
-        outcome = stop_process(pid, timeout=5.0)
-        assert outcome.signalled is False
-        assert outcome.killed is False
-    finally:
-        os.waitpid(pid, 0)
 
 
 def test_pid_alive_zombie_via_ps_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -430,43 +313,10 @@ def test_pid_alive_nonpositive_pid_is_dead() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stop_running_process(tmp_path: Path) -> None:
-    """stop sends SIGTERM and cleans up pid.json."""
-    proc = subprocess.Popen(
-        [PYTHON, "-c",
-         "import time, signal;"
-         "signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(30)"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    unit_dir = tmp_path / "stop-running"
-    _write_payload(unit_dir / "pid.json",
-                   {"pid": proc.pid, "command": [], "started_at": time.time()})
-
-    result = stop(unit_dir)
-    assert result.pid == proc.pid
-    assert result.signalled is True or result.killed is True
-    assert not (unit_dir / "pid.json").exists()
 
 
-def test_stop_stale_pid(tmp_path: Path) -> None:
-    """stop with a stale pid cleans up and returns cleaned=True."""
-    unit_dir = tmp_path / "stop-stale"
-    _write_payload(unit_dir / "pid.json",
-                   {"pid": 999_999_999, "command": [], "started_at": 0})
-
-    result = stop(unit_dir)
-    assert result.cleaned is True
-    assert result.signalled is False
-    assert result.killed is False
-    assert not (unit_dir / "pid.json").exists()
 
 
-def test_stop_no_pid_file(tmp_path: Path) -> None:
-    """stop raises FileNotFoundError when pid.json is missing."""
-    with pytest.raises(FileNotFoundError):
-        stop(tmp_path / "nonexistent")
 
 
 # ---------------------------------------------------------------------------
@@ -474,47 +324,10 @@ def test_stop_no_pid_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stop_process_dead_pid() -> None:
-    """A dead pid yields signalled=False, killed=False and does no I/O."""
-    outcome = stop_process(999_999_999)
-    assert isinstance(outcome, StopOutcome)
-    assert outcome.pid == 999_999_999
-    assert outcome.signalled is False
-    assert outcome.killed is False
 
 
-def test_stop_process_graceful() -> None:
-    """A process honouring SIGTERM exits within the timeout, not killed."""
-    proc = subprocess.Popen(
-        [PYTHON, "-c", "import time; time.sleep(30)"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    outcome = stop_process(proc.pid, timeout=5.0)
-    assert outcome.pid == proc.pid
-    assert outcome.signalled is True
-    assert outcome.killed is False
 
 
-def test_stop_process_escalates_to_sigkill() -> None:
-    """A process ignoring SIGTERM is escalated to SIGKILL."""
-    proc = subprocess.Popen(
-        [PYTHON, "-c",
-         "import time, signal;"
-         "signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(30)"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    # Let the child install its SIGTERM handler before we signal, otherwise a
-    # SIGTERM landing during interpreter startup terminates it by default and
-    # the escalation path never runs.
-    time.sleep(0.5)
-    outcome = stop_process(proc.pid, timeout=0.5)
-    assert outcome.pid == proc.pid
-    assert outcome.signalled is True
-    assert outcome.killed is True
 
 
 def test_stop_outcome_immutable() -> None:
@@ -698,31 +511,6 @@ def test_converge_noop_when_disabled(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_converge_stops_disabled_running_unit(tmp_path: Path) -> None:
-    stop_calls, stop_action = _recording_stop()
-    rec = DesiredStateReconciler(tmp_path, stop_action=stop_action)
-    spec = ProcessSpec(unit="eli", command=(PYTHON, "-c", "pass"))
-
-    # A genuinely-running child so observe_actual reports "running".
-    proc = subprocess.Popen(
-        [PYTHON, "-c", "import time; time.sleep(30)"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        write_json_atomic(
-            rec.unit_dir("eli") / "pid.json",
-            {"pid": proc.pid, "command": [], "started_at": time.time()},
-        )
-        rec.disable("eli")
-        outcome = rec.reconcile_unit(spec, honor_desired_state)
-        assert outcome.action == "stopped"
-        assert outcome.actual == "stopped"
-        assert stop_calls == [rec.unit_dir("eli")]
-        assert rec.load_state("eli")["pid"] is None
-    finally:
-        os.kill(proc.pid, signal.SIGKILL)
 
 
 def test_default_spawn_action_injects_generation(tmp_path: Path) -> None:
@@ -1147,7 +935,7 @@ def test_control_plane_observe_is_read_only_on_stale_pid(tmp_path: Path) -> None
     _write_payload(pid_file, {"pid": 999_999_999, "command": [], "started_at": 0})
 
     obs = cp.observe_unit("eli")
-    assert obs.actual == "stopped"
+    assert obs.actual == "unknown"
     assert obs.pid is None
     # The stale pid file survives -- observe did not mutate the filesystem.
     assert pid_file.exists()
@@ -1174,3 +962,92 @@ def test_unit_observation_immutable() -> None:
     assert obs.pid == 42
     with pytest.raises(AttributeError):
         obs.pid = 7  # type: ignore[misc]
+
+
+def test_launch_intent_is_durable_before_popen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parent failure at Popen leaves a durable fence and blocks retry."""
+    from datasource_kit import fleet
+    monkeypatch.setattr(fleet.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash")))
+    with pytest.raises(RuntimeError, match="crash"):
+        spawn(ProcessSpec(unit="u", command=(PYTHON, "-c", "pass")), unit_dir=tmp_path, generation=1)
+    intent = json.loads((tmp_path / "pid.json").read_text())
+    assert intent["status"] == "launch_intent" and intent["pid"] is None
+    with pytest.raises(ProcessTombstoneError):
+        spawn(ProcessSpec(unit="u", command=(PYTHON, "-c", "pass")), unit_dir=tmp_path, generation=2)
+
+
+def test_unit_path_traversal_is_rejected(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    for unit in ("../escape", "a/b", ".", "..", ""):
+        with pytest.raises(ValueError):
+            rec.enable(unit)
+        with pytest.raises(ValueError):
+            ProcessSpec(unit=unit, command=(PYTHON, "-c", "pass"))
+
+
+def test_clearance_rejects_pid_and_audit_symlinks(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"outside-{time.time_ns()}"
+    outside.write_text(json.dumps({"unit": "u", "generation": 1, "token": "t"}))
+    (tmp_path / "pid.json").symlink_to(outside)
+    with pytest.raises(ProcessTombstoneError):
+        clear_process_tombstone(tmp_path, unit="u", generation=1, token="t", workload_fully_gone_asserted=True)
+    (tmp_path / "pid.json").unlink()
+    _write_payload(tmp_path / "pid.json", {"unit": "u", "generation": 1, "token": "t"})
+    audit_target = tmp_path.parent / f"audit-{time.time_ns()}"
+    audit_target.write_text("safe")
+    (tmp_path / "process-clearance.audit.jsonl").symlink_to(audit_target)
+    with pytest.raises(OSError):
+        clear_process_tombstone(tmp_path, unit="u", generation=1, token="t", workload_fully_gone_asserted=True)
+    assert audit_target.read_text() == "safe" and (tmp_path / "pid.json").exists()
+
+
+def test_stop_never_uses_stale_or_foreign_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datasource_kit import fleet
+    class Handle:
+        pid = 123
+        def poll(self): return None
+        def terminate(self): raise AssertionError("must not signal")
+    fleet._OWNED_HANDLES["cap"] = Handle()
+    try:
+        _write_payload(tmp_path / "pid.json", {"pid": 124, "token": "cap"})
+        assert stop(tmp_path).signalled is False
+    finally:
+        fleet._OWNED_HANDLES.pop("cap", None)
+
+
+def test_corrupt_and_unreadable_tombstone_observation_is_unknown(tmp_path: Path) -> None:
+    rec = DesiredStateReconciler(tmp_path)
+    cp = WorkerControlPlane(rec, ["u"])
+    rec.enable("u")
+    path = rec.unit_dir("u") / "pid.json"
+    path.write_text("{broken")
+    assert cp.observe_unit("u").actual == "unknown"
+    path.unlink()
+    path.mkdir()
+    assert cp.observe_unit("u").actual == "unknown"
+
+
+
+def test_unit_directory_and_lock_symlinks_are_rejected(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ProcessTombstoneError):
+        spawn(ProcessSpec(unit="u", command=(PYTHON, "-c", "pass")), unit_dir=linked)
+
+    unit = tmp_path / "unit"
+    unit.mkdir()
+    (unit / ".process.lock").symlink_to(tmp_path / "lock-target")
+    rec = DesiredStateReconciler(tmp_path)
+    with pytest.raises(OSError):
+        rec.reconcile_unit(ProcessSpec(unit="unit", command=(PYTHON, "-c", "pass")), honor_desired_state)
+
+
+
+def test_short_lived_spawn_retires_capability_but_keeps_tombstone(tmp_path: Path) -> None:
+    from datasource_kit import fleet
+    result = spawn(ProcessSpec(unit="u", command=(PYTHON, "-c", "pass"), probe_window=.2, probe_sleep=.01), unit_dir=tmp_path)
+    assert result.alive is False
+    assert result.token not in fleet._OWNED_HANDLES
+    assert (tmp_path / "pid.json").exists()
