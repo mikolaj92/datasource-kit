@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import threading
 import time
@@ -29,6 +30,25 @@ def clear(root: Path, digest: str, **changes: object) -> Path:
     }
     args.update(changes)
     return clear_legacy_process_tombstone(root, **args)  # type: ignore[arg-type]
+
+
+def _mixed_clearance_process(root: str, digest: str, results: object) -> None:
+    """Spawn-safe worker for the mixed process/thread regression test."""
+    queue = results
+
+    def run() -> None:
+        try:
+            result = clear(Path(root), digest)
+        except BaseException as exc:  # noqa: BLE001 - crosses process boundary
+            queue.put(("error", type(exc).__name__, str(exc)))  # type: ignore[attr-defined]
+        else:
+            queue.put(("ok", str(result)))  # type: ignore[attr-defined]
+
+    threads = [threading.Thread(target=run) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 def test_clear_audits_then_quarantines_without_signalling(tmp_path: Path) -> None:
@@ -133,6 +153,33 @@ def test_concurrent_calls_have_one_audit_and_are_idempotent(tmp_path: Path) -> N
     for thread in threads: thread.join()
     assert not errors and len(results) == 8
     assert len(results[0].read_text().splitlines()) == 1
+
+
+def test_six_spawned_processes_with_eight_threads_are_idempotent(tmp_path: Path) -> None:
+    """Regress Darwin's O_CREAT/O_NOFOLLOW race for an initially absent lock."""
+    _, digest = legacy(tmp_path / "pid.json")
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    processes = [
+        context.Process(target=_mixed_clearance_process,
+                        args=(str(tmp_path.resolve()), digest, results))
+        for _ in range(6)
+    ]
+    for process in processes:
+        process.start()
+    received = [results.get(timeout=30) for _ in range(48)]
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    errors = [result for result in received if result[0] == "error"]
+    assert not errors
+    returned = {result[1] for result in received}
+    assert len(returned) == 1
+    audit_dir = tmp_path / "legacy-process-clearance.audit.d"
+    assert len(list(audit_dir.glob("intent-*.json"))) == 1
+    assert len(list(audit_dir.glob("complete-*.json"))) == 1
+    assert len(list(tmp_path.glob("*.quarantine"))) == 1
 
 
 def test_crash_after_quarantine_link_is_recoverable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,6 +289,7 @@ def test_forged_completion_with_live_pid_fails_without_retirement(tmp_path: Path
         clear(tmp_path, digest)
     assert (tmp_path / "pid.json").read_bytes() == raw
     assert completion.exists()
+
 
 
 def test_crash_after_audit_publication_before_temp_unlink_recovers(

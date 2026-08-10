@@ -730,8 +730,24 @@ def _clear_legacy_process_tombstone_locked(
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         # Every subsequent authorization and mutation is anchored to this one FD.
-        lock_flags = os.O_RDWR | os.O_CREAT | nofollow
-        lock_fd = os.open(".process.lock", lock_flags, 0o600, dir_fd=dir_fd)
+        # Darwin can transiently return ENOENT when several processes race in
+        # open(O_CREAT | O_NOFOLLOW) for the same absent pathname.  Make the
+        # creation race explicit instead: exactly one caller creates, and all
+        # losers open the resulting entry without O_CREAT.
+        lock_flags = os.O_RDWR | nofollow
+        try:
+            lock_fd = os.open(
+                ".process.lock", lock_flags | os.O_CREAT | os.O_EXCL,
+                0o600, dir_fd=dir_fd,
+            )
+        except FileExistsError:
+            try:
+                lock_fd = os.open(".process.lock", lock_flags, dir_fd=dir_fd)
+            except FileNotFoundError as exc:
+                # A disappearing lock is a namespace violation, not a raw OS
+                # error.  Same-euid removal is outside the trust boundary, but
+                # public callers must still fail closed predictably.
+                raise ProcessTombstoneError("unit lock pathname identity changed") from exc
         try:
             lst = os.fstat(lock_fd)
             named = os.stat(".process.lock", dir_fd=dir_fd, follow_symlinks=False)
