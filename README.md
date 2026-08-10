@@ -404,3 +404,16 @@ def update_database(*, db_path) -> dict:
 ```bash
 uv run pytest
 ```
+
+
+### Fail-closed process lifecycle
+
+Fleet worker launch is deliberately first-launch-only. The session-leader exec gate waits
+for durable `pid.json` provenance (`unit`, `generation`, stable random `token`) before
+executing consumer code. Any surviving metadata is a tombstone, regardless of PID
+liveness or readability, and prevents automatic replacement. Disabling never removes it.
+The owning in-memory supervisor may request cooperative TERM through its live `Popen`
+handle; no numeric-PID signalling, escalation, adoption, guardian cleanup, or restart is
+performed. After externally proving the entire workload is gone, an operator may call
+`clear_process_tombstone` with the exact identity and explicit assertion; clearance is
+audited before replacement becomes eligible.

@@ -171,8 +171,8 @@ def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
     # (no 404) nor a crash (no 500) -- it reads as a normal stopped
     # observation, and the single-unit and whole-fleet reads agree.
     assert single.status_code == 200
-    assert single.json()["actual"] == "stopped"
+    assert single.json()["actual"] == "unknown"
     assert single.json()["pid"] is None
     assert fleet.status_code == 200
     eli = next(row for row in fleet.json() if row["unit"] == "eli")
-    assert eli["actual"] == "stopped"
+    assert eli["actual"] == "unknown"
