@@ -101,21 +101,28 @@ def test_concurrent_calls_have_one_audit_and_are_idempotent(tmp_path: Path) -> N
     assert len(results[0].read_text().splitlines()) == 1
 
 
-def test_crash_after_durable_audit_is_recoverable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_crash_after_quarantine_link_is_recoverable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, digest = legacy(tmp_path / "pid.json")
-    real_rename = os.rename
-    calls = 0
-    def crash(*args: object, **kwargs: object) -> None:
-        nonlocal calls
-        calls += 1
-        raise OSError("simulated crash before retirement")
-    monkeypatch.setattr(os, "rename", crash)
+    real_unlink = os.unlink
+    crashed = False
+    def crash(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal crashed
+        if path == "pid.json" and not crashed:
+            crashed = True
+            raise OSError("simulated crash before source retirement")
+        real_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", crash)
     with pytest.raises(OSError): clear(tmp_path, digest)
     assert (tmp_path / "pid.json").exists()
-    assert len((tmp_path / "legacy-process-clearance.audit.jsonl").read_text().splitlines()) == 1
-    monkeypatch.setattr(os, "rename", real_rename)
-    clear(tmp_path, digest)
-    assert len((tmp_path / "legacy-process-clearance.audit.jsonl").read_text().splitlines()) == 1
+    intents = list((tmp_path / "legacy-process-clearance.audit.d").glob("intent-*.json"))
+    assert len(intents) == 1
+    quarantine = tmp_path / json.loads(intents[0].read_text())["quarantine"]
+    assert quarantine.exists() and os.stat(quarantine).st_ino == os.stat(tmp_path / "pid.json").st_ino
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    completion = clear(tmp_path, digest)
+    assert completion.name.startswith("complete-")
+    assert not (tmp_path / "pid.json").exists()
+    assert quarantine.stat().st_nlink == 1
 
 
 def test_path_swap_before_cas_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,3 +141,59 @@ def test_path_swap_before_cas_fails_closed(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(ProcessTombstoneError, match="identity changed"):
         clear(tmp_path, digest)
     assert (tmp_path / "pid.json").read_bytes() == replacement
+
+
+def test_bounds_operator_and_ticket_before_writing(tmp_path: Path) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    with pytest.raises(ProcessTombstoneError, match="bounded operator"):
+        clear(tmp_path, digest, operator="x" * 257)
+    with pytest.raises(ProcessTombstoneError, match="bounded ticket"):
+        clear(tmp_path, digest, ticket="x" * 513)
+    assert not (tmp_path / "legacy-process-clearance.audit.d").exists()
+
+
+def test_private_regular_single_link_lock_required(tmp_path: Path) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    lock = tmp_path / ".process.lock"
+    lock.write_text("")
+    lock.chmod(0o644)
+    with pytest.raises(ProcessTombstoneError, match="unit lock"):
+        clear(tmp_path, digest)
+
+
+def test_existing_quarantine_collision_is_noreplace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    real_link = os.link
+    collision = b"do not replace"
+    def colliding_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if src == "pid.json":
+            (tmp_path / str(dst)).write_bytes(collision)
+        real_link(src, dst, *args, **kwargs)
+    monkeypatch.setattr(os, "link", colliding_link)
+    with pytest.raises(ProcessTombstoneError, match="collision"):
+        clear(tmp_path, digest)
+    assert (tmp_path / "pid.json").exists()
+    assert any(path.read_bytes() == collision for path in tmp_path.glob("*.quarantine"))
+
+
+def test_torn_unpublished_audit_temp_does_not_wedge_retry(tmp_path: Path) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    audit_dir = tmp_path / "legacy-process-clearance.audit.d"
+    audit_dir.mkdir(mode=0o700)
+    (audit_dir / ".tmp-deadbeef").write_bytes(b'{"torn"')
+    assert clear(tmp_path, digest).name.startswith("complete-")
+
+
+def test_audit_is_two_atomic_files_and_binds_all_request_fields(tmp_path: Path) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    completion = clear(tmp_path, digest)
+    audit_dir = completion.parent
+    intents = list(audit_dir.glob("intent-*.json"))
+    completes = list(audit_dir.glob("complete-*.json"))
+    assert len(intents) == len(completes) == 1
+    intent, complete = json.loads(intents[0].read_text()), json.loads(completes[0].read_text())
+    for key in ("unit", "generation", "operator", "ticket", "tombstone_sha256", "quarantine", "operation_id"):
+        assert intent[key] == complete[key]
+    assert intent["event"].endswith("intent") and complete["event"].endswith("complete")
+    with pytest.raises(ProcessTombstoneError):
+        clear(tmp_path, digest, ticket="different")
