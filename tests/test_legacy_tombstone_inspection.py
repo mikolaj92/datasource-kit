@@ -43,6 +43,17 @@ def test_malformed_metadata_is_not_reported_clearable(tmp_path: Path) -> None:
     assert result.token_absent is False
 
 
+def test_json_integer_over_interpreter_limit_is_not_reported_clearable(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pid.json").write_bytes(
+        b'{"generation":' + (b"9" * 5_000) + b'}'
+    )
+    result = inspect_legacy_process_tombstone(tmp_path)
+    assert result.generation is None
+    assert result.token_absent is False
+
+
 def test_symlink_and_hardlink_tombstones_fail_closed(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.write_text('{"generation":4}')

@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from datasource_kit import ProcessTombstoneError, clear_legacy_process_tombstone
+from datasource_kit import fleet
 
 
 def legacy(path: Path, **changes: object) -> tuple[bytes, str]:
@@ -84,6 +86,38 @@ def test_symlink_and_hardlink_fail_closed(tmp_path: Path) -> None:
     os.link(outside, tmp_path / "pid.json")
     with pytest.raises(ProcessTombstoneError):
         clear(tmp_path, digest)
+
+
+def test_threads_are_serialized_before_clearance_descriptor_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """flock is not a thread mutex on every supported POSIX platform."""
+    active = 0
+    maximum = 0
+    guard = threading.Lock()
+
+    def clearance(*args: object, **kwargs: object) -> Path:
+        nonlocal active, maximum
+        with guard:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.002)
+        with guard:
+            active -= 1
+        return tmp_path / "complete.json"
+
+    monkeypatch.setattr(fleet, "_clear_legacy_process_tombstone_locked", clearance)
+    threads = [threading.Thread(
+        target=lambda: clear_legacy_process_tombstone(
+            tmp_path, unit="u", generation=4, expected_sha256="0" * 64,
+            workload_fully_gone_asserted=True, operator="alice", ticket="OPS-42",
+        )
+    ) for _ in range(32)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert maximum == 1
 
 
 def test_concurrent_calls_have_one_audit_and_are_idempotent(tmp_path: Path) -> None:

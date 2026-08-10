@@ -23,6 +23,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -174,6 +175,9 @@ _STOP_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = signal.SIGKILL
 _DEFAULT_TIMEOUT = 5.0
 _OWNED_HANDLES: dict[str, subprocess.Popen[Any]] = {}
+# POSIX record locks do not serialize threads reliably (and macOS flock locks
+# are process-associated), so protect descriptor ownership within this process.
+_LEGACY_CLEARANCE_THREAD_LOCK = threading.RLock()
 
 
 def _validate_unit(unit: str) -> str:
@@ -679,7 +683,7 @@ def inspect_legacy_process_tombstone(
             )
             try:
                 metadata = json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 metadata = None
             generation = metadata.get("generation") if isinstance(metadata, dict) else None
             if not isinstance(generation, int) or isinstance(generation, bool):
@@ -696,7 +700,7 @@ def inspect_legacy_process_tombstone(
         os.close(dir_fd)
 
 
-def clear_legacy_process_tombstone(
+def _clear_legacy_process_tombstone_locked(
     unit_dir: str | Path, *, unit: str, generation: int,
     expected_sha256: str, workload_fully_gone_asserted: bool,
     operator: str, ticket: str,
@@ -908,6 +912,21 @@ def clear_legacy_process_tombstone(
             finally: os.close(lock_fd)
     finally:
         os.close(dir_fd)
+
+def clear_legacy_process_tombstone(
+    unit_dir: str | Path, *, unit: str, generation: int,
+    expected_sha256: str, workload_fully_gone_asserted: bool,
+    operator: str, ticket: str,
+) -> Path:
+    """Serialize same-process callers, then use the file lock across processes."""
+    with _LEGACY_CLEARANCE_THREAD_LOCK:
+        return _clear_legacy_process_tombstone_locked(
+            unit_dir, unit=unit, generation=generation,
+            expected_sha256=expected_sha256,
+            workload_fully_gone_asserted=workload_fully_gone_asserted,
+            operator=operator, ticket=ticket,
+        )
+
 
 def clear_process_tombstone(
     unit_dir: str | Path, *, unit: str, generation: int, token: str,
