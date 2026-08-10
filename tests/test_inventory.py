@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from datasource_kit import InventoryEntry, InventoryError, fleet_inventory
+from datasource_kit import (
+    EXECUTION_AUTONOMOUS,
+    InventoryEntry,
+    InventoryError,
+    fleet_inventory,
+)
 
 
 def _write(path: Path, body: str) -> None:
@@ -19,7 +24,7 @@ def _make_plugin_package(root: Path, package: str) -> None:
     pkg_dir = root / package
     _write(pkg_dir / "__init__.py", "")
 
-    # Autonomous scraper declared via the legacy boolean.
+    # Autonomous scraper declared via the first-class execution model.
     _write(
         pkg_dir / "eli" / "__init__.py",
         "",
@@ -27,9 +32,10 @@ def _make_plugin_package(root: Path, package: str) -> None:
     _write(
         pkg_dir / "eli" / "manifest.py",
         (
-            "from datasource_kit import Manifest, SourceContract\n"
+            "from datasource_kit import EXECUTION_AUTONOMOUS, ExecutionModel, Manifest, SourceContract\n"
             "MANIFEST = Manifest(\n"
-            "    name='eli', source_type='acts', supports_autonomous=True,\n"
+            "    name='eli', source_type='acts',\n"
+            "    execution=ExecutionModel(EXECUTION_AUTONOMOUS),\n"
             "    rate_limit={'rps': 2.0},\n"
             "    contract=SourceContract('s', 'e', ('p',), 'id', 'corpus'),\n"
             ")\n"
@@ -41,10 +47,10 @@ def _make_plugin_package(root: Path, package: str) -> None:
     _write(
         pkg_dir / "saos" / "manifest.py",
         (
-            "from datasource_kit import ExecutionModel, Manifest, SourceContract\n"
+            "from datasource_kit import EXECUTION_AUTONOMOUS, ExecutionModel, Manifest, SourceContract\n"
             "MANIFEST = Manifest(\n"
             "    name='saos', source_type='judgments',\n"
-            "    execution=ExecutionModel('autonomous', 'saos.worker:run'),\n"
+            "    execution=ExecutionModel(EXECUTION_AUTONOMOUS, 'saos.worker:run'),\n"
             "    contract=SourceContract('s', 'e', ('p',), 'id', 'corpus'),\n"
             ")\n"
         ),
@@ -83,7 +89,7 @@ def test_fleet_inventory_reads_capability_flags(plugin_pkg: str):
     eli, saos, clp = entries
     assert eli.is_autonomous is True
     assert eli.has_contract is True
-    assert eli.execution_model == ""  # legacy boolean, no first-class model
+    assert eli.execution_model == EXECUTION_AUTONOMOUS
     assert eli.rate_limit == {"rps": 2.0}
 
     assert saos.is_autonomous is True

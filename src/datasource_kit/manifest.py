@@ -61,11 +61,8 @@ class Manifest:
     so batch sources can leave it empty and scraper sources can populate it.
     An autonomous source must declare a :class:`SourceContract`.
 
-    ``execution`` is the first-class way to state how the source runs (its
-    :class:`ExecutionModel`). The older boolean ``supports_autonomous`` is kept
-    for backward compatibility but is superseded by
-    ``execution=ExecutionModel("autonomous", ...)``; :attr:`is_autonomous`
-    honours either signal, and the contract requirement applies to both.
+    ``execution`` states how the source runs. An autonomous source declares
+    ``execution=ExecutionModel(EXECUTION_AUTONOMOUS, ...)`` and a contract.
     """
 
     name: str
@@ -73,7 +70,6 @@ class Manifest:
     priority: int = 50
     jurisdiction: str = ""
     implementation_status: str = "active"
-    supports_autonomous: bool = False
     rate_limit: dict[str, float] = field(default_factory=dict)
     contract: SourceContract | None = None
     execution: ExecutionModel | None = None
@@ -86,14 +82,8 @@ class Manifest:
 
     @property
     def is_autonomous(self) -> bool:
-        """True if the source runs as an autonomous worker, by either signal.
+        """Whether ``execution`` declares the autonomous execution model."""
 
-        Honours both the legacy ``supports_autonomous`` boolean and a first-class
-        ``execution`` whose model is :data:`EXECUTION_AUTONOMOUS`.
-        """
-
-        if self.supports_autonomous:
-            return True
         return self.execution is not None and self.execution.model == EXECUTION_AUTONOMOUS
 
     @property

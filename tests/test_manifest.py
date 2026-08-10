@@ -18,14 +18,17 @@ def _contract() -> SourceContract:
 def test_batch_manifest_minimal():
     m = Manifest(name="clp", source_type="batch")
     assert m.priority == 50
-    assert m.supports_autonomous is False
     assert m.rate_limit == {}
     assert m.contract is None
 
 
 def test_autonomous_manifest_requires_contract():
     with pytest.raises(ValueError):
-        Manifest(name="saos", source_type="scraper", supports_autonomous=True)
+        Manifest(
+            name="saos",
+            source_type="scraper",
+            execution=ExecutionModel(model=EXECUTION_AUTONOMOUS),
+        )
 
 
 def test_autonomous_manifest_with_contract_ok():
@@ -33,7 +36,7 @@ def test_autonomous_manifest_with_contract_ok():
     m = Manifest(
         name="saos",
         source_type="scraper",
-        supports_autonomous=True,
+        execution=ExecutionModel(model=EXECUTION_AUTONOMOUS),
         rate_limit={"rps": 1.0, "burst": 2.0},
         contract=contract,
     )
@@ -68,15 +71,14 @@ def test_execution_autonomous_requires_contract():
         )
 
 
-def test_execution_autonomous_supersedes_supports_autonomous():
+def test_execution_autonomous_is_first_class():
     m = Manifest(
         name="saos",
         source_type="scraper",
         execution=ExecutionModel(model="autonomous", step_ref="saos.worker:run"),
         contract=_contract(),
     )
-    assert m.supports_autonomous is False  # legacy flag left unset
-    assert m.is_autonomous is True  # first-class execution wins
+    assert m.is_autonomous is True
     assert m.execution_model == "autonomous"
 
 

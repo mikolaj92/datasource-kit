@@ -201,8 +201,8 @@ module that is missing, fails to import, or exposes no `Manifest` raises
 
 A `Manifest` states how a source runs with a first-class `execution`
 (`ExecutionModel(model, step_ref)`); `model="autonomous"` marks a long-lived
-worker and requires a `SourceContract`. The older boolean `supports_autonomous`
-is still honoured by `is_autonomous` but is superseded by `execution`.
+worker and requires a `SourceContract`. Autonomous execution must be declared with the exported `EXECUTION_AUTONOMOUS`
+constant; `is_autonomous` derives exclusively from that first-class model.
 
 ## Autonomous Worker Host
 
