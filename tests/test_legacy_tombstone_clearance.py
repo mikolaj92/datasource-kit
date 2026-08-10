@@ -197,3 +197,66 @@ def test_audit_is_two_atomic_files_and_binds_all_request_fields(tmp_path: Path) 
     assert intent["event"].endswith("intent") and complete["event"].endswith("complete")
     with pytest.raises(ProcessTombstoneError):
         clear(tmp_path, digest, ticket="different")
+
+
+def test_forged_completion_with_live_pid_fails_without_retirement(tmp_path: Path) -> None:
+    raw, digest = legacy(tmp_path / "pid.json")
+    completion = clear(tmp_path, digest)
+    # Model a forged/inconsistent completed namespace with a newly live tombstone.
+    (tmp_path / "pid.json").write_bytes(raw)
+    with pytest.raises(ProcessTombstoneError, match="completion exists while tombstone"):
+        clear(tmp_path, digest)
+    assert (tmp_path / "pid.json").read_bytes() == raw
+    assert completion.exists()
+
+
+def test_crash_after_audit_publication_before_temp_unlink_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    real_unlink = os.unlink
+    crashed = False
+    def crash(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal crashed
+        if isinstance(path, str) and path.startswith(".tmp-") and not crashed:
+            crashed = True
+            raise OSError("simulated crash after audit link publication")
+        real_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", crash)
+    with pytest.raises(OSError):
+        clear(tmp_path, digest)
+    audit_dir = tmp_path / "legacy-process-clearance.audit.d"
+    intent = next(audit_dir.glob("intent-*.json"))
+    temps = list(audit_dir.glob(".tmp-*"))
+    assert len(temps) == 1 and intent.stat().st_ino == temps[0].stat().st_ino
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    completion = clear(tmp_path, digest)
+    assert completion.exists() and not temps[0].exists()
+    assert intent.stat().st_nlink == 1
+
+
+def test_audit_directory_swap_is_detected_before_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    real_stat = os.stat
+    checks = 0
+    swapped = False
+    def swapping_stat(path: object, *args: object, **kwargs: object):
+        nonlocal checks, swapped
+        if path == "legacy-process-clearance.audit.d" and kwargs.get("dir_fd") is not None:
+            checks += 1
+            # open validation, initial binding, then pre-retirement binding
+            if checks == 3 and not swapped:
+                swapped = True
+                os.rename(tmp_path / str(path), tmp_path / "audit-preserved")
+                (tmp_path / str(path)).mkdir(mode=0o700)
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", swapping_stat)
+    with pytest.raises(ProcessTombstoneError, match="audit directory pathname identity changed"):
+        clear(tmp_path, digest)
+    assert swapped
+    assert (tmp_path / "pid.json").exists()  # pre-retirement identity gate
+    assert list((tmp_path / "audit-preserved").glob("intent-*.json"))
+    quarantine = list(tmp_path.glob("*.quarantine"))
+    assert len(quarantine) == 1  # conservative hard-link publication remains auditable
