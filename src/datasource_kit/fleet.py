@@ -16,6 +16,7 @@ Boundaries
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -42,6 +43,7 @@ __all__ = [
     "stop",
     "stop_process",
     "clear_process_tombstone",
+    "clear_legacy_process_tombstone",
     "ProcessTombstoneError",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
@@ -449,6 +451,196 @@ def stop(unit_dir: str | Path, *, timeout: float = _DEFAULT_TIMEOUT) -> StopResu
     data["status"] = "stop_requested_or_unknown"
     write_json_atomic(path, data)
     return StopResult(int(pid or 0), signalled, False, False)
+
+
+def _read_regular_fd(fd: int, *, limit: int = 16 * 1024 * 1024) -> bytes:
+    """Read a small regular file from its already validated descriptor."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(1024 * 1024, limit + 1 - size))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            raise ProcessTombstoneError("tombstone is unreasonably large")
+
+
+def _legacy_audit_records(fd: int) -> list[dict[str, Any]]:
+    raw = _read_regular_fd(fd)
+    records: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        try:
+            value = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProcessTombstoneError("clearance audit is malformed") from exc
+        if not isinstance(value, dict):
+            raise ProcessTombstoneError("clearance audit is malformed")
+        records.append(value)
+    return records
+
+
+def clear_legacy_process_tombstone(
+    unit_dir: str | Path, *, unit: str, generation: int,
+    expected_sha256: str, workload_fully_gone_asserted: bool,
+    operator: str, ticket: str,
+) -> Path:
+    """Quarantine one tokenless legacy tombstone after operator attestation.
+
+    This migration deliberately performs no process inspection or signalling.
+    ``expected_sha256`` is the digest of the exact bytes opened with
+    ``O_NOFOLLOW``.  The durable audit precedes the atomic rename into a
+    private quarantine file; quarantines are never automatically deleted.
+    """
+    import stat
+
+    _validate_unit(unit)
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        raise ProcessTombstoneError("generation must be an integer")
+    if not workload_fully_gone_asserted:
+        raise ProcessTombstoneError("explicit workload-gone assertion is required")
+    if not isinstance(operator, str) or not operator.strip():
+        raise ProcessTombstoneError("nonempty operator is required")
+    if not isinstance(ticket, str) or not ticket.strip():
+        raise ProcessTombstoneError("nonempty operator ticket is required")
+    if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in expected_sha256)):
+        raise ProcessTombstoneError("expected_sha256 must be a lowercase SHA-256 digest")
+
+    directory = _ensure_unit_dir(unit_dir)
+    audit_name = "legacy-process-clearance.audit.jsonl"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    with _unit_lock(directory):
+        dir_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+        try:
+            # The audit itself is trusted state: never follow or share it.
+            audit_flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | nofollow
+            audit_fd = os.open(audit_name, audit_flags, 0o600, dir_fd=dir_fd)
+            try:
+                audit_stat = os.fstat(audit_fd)
+                if (not stat.S_ISREG(audit_stat.st_mode) or audit_stat.st_nlink != 1
+                        or audit_stat.st_mode & 0o077):
+                    raise ProcessTombstoneError("clearance audit must be private regular file")
+                records = _legacy_audit_records(audit_fd)
+
+                def matches(record: Mapping[str, Any]) -> bool:
+                    return (record.get("event") == "legacy_tokenless_tombstone_quarantine"
+                            and record.get("unit") == unit
+                            and record.get("generation") == generation
+                            and record.get("operator") == operator
+                            and record.get("ticket") == ticket
+                            and record.get("asserted_workload_fully_gone") is True
+                            and record.get("tombstone_sha256") == expected_sha256)
+
+                prior = next((record for record in reversed(records) if matches(record)), None)
+                try:
+                    pid_fd = os.open(_PID_FILE, os.O_RDONLY | nofollow, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    if prior is None:
+                        raise ProcessTombstoneError("tombstone absent and no matching audit")
+                    quarantine = prior.get("quarantine")
+                    if not isinstance(quarantine, str) or Path(quarantine).name != quarantine:
+                        raise ProcessTombstoneError("matching audit has invalid quarantine")
+                    qfd = os.open(quarantine, os.O_RDONLY | nofollow, dir_fd=dir_fd)
+                    try:
+                        qstat = os.fstat(qfd)
+                        qraw = _read_regular_fd(qfd)
+                        if (not stat.S_ISREG(qstat.st_mode) or qstat.st_nlink != 1
+                                or qstat.st_mode & 0o077
+                                or hashlib.sha256(qraw).hexdigest() != expected_sha256):
+                            raise ProcessTombstoneError("audited quarantine does not match")
+                    finally:
+                        os.close(qfd)
+                    return directory / audit_name
+
+                try:
+                    opened_stat = os.fstat(pid_fd)
+                    if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+                        raise ProcessTombstoneError("tombstone must be an unlinked regular file")
+                    raw = _read_regular_fd(pid_fd)
+                    digest = hashlib.sha256(raw).hexdigest()
+                    if digest != expected_sha256:
+                        raise ProcessTombstoneError("tombstone SHA-256 does not match")
+                    try:
+                        data = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ProcessTombstoneError("legacy tombstone is malformed") from exc
+                    if not isinstance(data, dict):
+                        raise ProcessTombstoneError("legacy tombstone must be a JSON object")
+                    if "token" in data:
+                        raise ProcessTombstoneError("tombstone is not tokenless legacy metadata")
+                    if (type(data.get("unit")) is not str or data.get("unit") != unit
+                            or type(data.get("generation")) is not int
+                            or data.get("generation") != generation):
+                        raise ProcessTombstoneError("unit/generation do not exactly match")
+
+                    # Re-read the same descriptor and compare the pathname identity
+                    # immediately before retirement (descriptor/path CAS).
+                    if _read_regular_fd(pid_fd) != raw:
+                        raise ProcessTombstoneError("tombstone changed while being verified")
+                    path_stat = os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+                    if (path_stat.st_dev, path_stat.st_ino, path_stat.st_nlink) != (
+                            opened_stat.st_dev, opened_stat.st_ino, 1):
+                        raise ProcessTombstoneError("tombstone pathname identity changed")
+
+                    # The eventual quarantine must never be briefly readable by
+                    # other users, even when legacy pid.json had loose mode bits.
+                    os.fchmod(pid_fd, 0o600)
+                    quarantine = (prior or {}).get("quarantine")
+                    if not isinstance(quarantine, str):
+                        quarantine = f".legacy-pid.{digest}.{uuid.uuid4().hex}.quarantine"
+                        record = {
+                            "event": "legacy_tokenless_tombstone_quarantine",
+                            "unit": unit,
+                            "generation": generation,
+                            "operator": operator,
+                            "ticket": ticket,
+                            "asserted_workload_fully_gone": True,
+                            "timestamp": time.time(),
+                            # Hashing the exact old bytes avoids copying possibly
+                            # sensitive, consumer-owned metadata into the audit.
+                            "tombstone_sha256": digest,
+                            "quarantine": quarantine,
+                        }
+                        encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                        view = memoryview(encoded)
+                        while view:
+                            written = os.write(audit_fd, view)
+                            if written <= 0:
+                                raise OSError("short write to clearance audit")
+                            view = view[written:]
+                        os.fsync(audit_fd)
+                        os.fsync(dir_fd)  # make a newly-created audit durable first
+
+                    # NOREPLACE is not portable. A UUID destination plus an
+                    # explicit absence check fails closed on interference.
+                    try:
+                        os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ProcessTombstoneError("quarantine destination already exists")
+                    os.rename(_PID_FILE, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                    qstat = os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+                    if (qstat.st_dev, qstat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+                        # Best-effort restoration ensures a detected final swap
+                        # does not silently authorize replacement work.
+                        try:
+                            os.rename(quarantine, _PID_FILE, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                        finally:
+                            os.fsync(dir_fd)
+                        raise ProcessTombstoneError("tombstone changed during retirement")
+                    os.chmod(quarantine, 0o600, dir_fd=dir_fd, follow_symlinks=False)
+                    os.fsync(dir_fd)
+                    return directory / audit_name
+                finally:
+                    os.close(pid_fd)
+            finally:
+                os.close(audit_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def clear_process_tombstone(
