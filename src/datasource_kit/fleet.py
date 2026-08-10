@@ -44,6 +44,8 @@ __all__ = [
     "stop_process",
     "clear_process_tombstone",
     "clear_legacy_process_tombstone",
+    "inspect_legacy_process_tombstone",
+    "LegacyProcessTombstoneInspection",
     "ProcessTombstoneError",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
@@ -642,6 +644,58 @@ def _read_exact_audit(dir_fd: int, name: str, expected: Mapping[str, Any]) -> bo
         os.close(fd)
 
 
+def inspect_legacy_process_tombstone(
+    unit_dir: str | Path,
+) -> LegacyProcessTombstoneInspection:
+    """Inspect a tombstone through the same trusted namespace used for clearance.
+
+    This is deliberately read-only and never performs PID liveness inspection.
+    The SHA-256 covers the exact bounded bytes read from the validated regular,
+    single-link ``pid.json`` descriptor.  Malformed metadata is represented by
+    ``generation=None`` and ``token_absent=False`` so callers cannot mistake it
+    for a clearable tokenless legacy record.
+    """
+    import stat
+
+    directory, dir_fd, unit_st = _open_trusted_unit_directory(Path(unit_dir))
+    try:
+        try:
+            pid_fd = os.open(
+                _PID_FILE, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd
+            )
+        except (FileNotFoundError, PermissionError) as exc:
+            raise ProcessTombstoneError("tombstone absent or unreadable") from exc
+        try:
+            opened = os.fstat(pid_fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ProcessTombstoneError("tombstone must be a regular single-link file")
+            raw = _read_regular_fd(pid_fd)
+            named = os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+            if not _same_inode(opened, named):
+                raise ProcessTombstoneError("tombstone pathname identity changed")
+            _bind_named_directory(
+                dir_fd, unit_st, directory,
+                message="unit directory pathname identity changed",
+            )
+            try:
+                metadata = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                metadata = None
+            generation = metadata.get("generation") if isinstance(metadata, dict) else None
+            if not isinstance(generation, int) or isinstance(generation, bool):
+                generation = None
+            return LegacyProcessTombstoneInspection(
+                path=directory / _PID_FILE,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                generation=generation,
+                token_absent=isinstance(metadata, dict) and "token" not in metadata,
+            )
+        finally:
+            os.close(pid_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def clear_legacy_process_tombstone(
     unit_dir: str | Path, *, unit: str, generation: int,
     expected_sha256: str, workload_fully_gone_asserted: bool,
@@ -964,6 +1018,16 @@ DESIRED_PAUSED = "paused"
 _CORE_STATE_KEYS = frozenset(
     {"schema_version", "unit", "desired", "actual", "generation", "pid"}
 )
+
+
+@dataclass(slots=True, frozen=True)
+class LegacyProcessTombstoneInspection:
+    """Read-only identity of a process tombstone opened in a trusted namespace."""
+
+    path: Path
+    sha256: str
+    generation: int | None
+    token_absent: bool
 
 
 class ProcessTombstoneError(RuntimeError):
