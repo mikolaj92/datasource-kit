@@ -23,6 +23,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -44,6 +45,8 @@ __all__ = [
     "stop_process",
     "clear_process_tombstone",
     "clear_legacy_process_tombstone",
+    "inspect_legacy_process_tombstone",
+    "LegacyProcessTombstoneInspection",
     "ProcessTombstoneError",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
@@ -172,6 +175,9 @@ _STOP_SIGNAL = signal.SIGTERM
 _KILL_SIGNAL = signal.SIGKILL
 _DEFAULT_TIMEOUT = 5.0
 _OWNED_HANDLES: dict[str, subprocess.Popen[Any]] = {}
+# POSIX record locks do not serialize threads reliably (and macOS flock locks
+# are process-associated), so protect descriptor ownership within this process.
+_LEGACY_CLEARANCE_THREAD_LOCK = threading.RLock()
 
 
 def _validate_unit(unit: str) -> str:
@@ -642,7 +648,71 @@ def _read_exact_audit(dir_fd: int, name: str, expected: Mapping[str, Any]) -> bo
         os.close(fd)
 
 
-def clear_legacy_process_tombstone(
+def _inspect_legacy_process_tombstone(
+    unit_dir: str | Path,
+) -> LegacyProcessTombstoneInspection:
+    """Inspect a tombstone through the same trusted namespace used for clearance.
+
+    This is deliberately read-only and never performs PID liveness inspection.
+    The SHA-256 covers the exact bounded bytes read from the validated regular,
+    single-link ``pid.json`` descriptor.  Malformed metadata is represented by
+    ``generation=None`` and ``token_absent=False`` so callers cannot mistake it
+    for a clearable tokenless legacy record.
+    """
+    import stat
+
+    directory, dir_fd, unit_st = _open_trusted_unit_directory(Path(unit_dir))
+    try:
+        try:
+            pid_fd = os.open(
+                _PID_FILE, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd
+            )
+        except (FileNotFoundError, PermissionError) as exc:
+            raise ProcessTombstoneError("tombstone absent or unreadable") from exc
+        try:
+            opened = os.fstat(pid_fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ProcessTombstoneError("tombstone must be a regular single-link file")
+            raw = _read_regular_fd(pid_fd)
+            named = os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+            if not _same_inode(opened, named):
+                raise ProcessTombstoneError("tombstone pathname identity changed")
+            _bind_named_directory(
+                dir_fd, unit_st, directory,
+                message="unit directory pathname identity changed",
+            )
+            try:
+                metadata = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                metadata = None
+            generation = metadata.get("generation") if isinstance(metadata, dict) else None
+            if not isinstance(generation, int) or isinstance(generation, bool):
+                generation = None
+            return LegacyProcessTombstoneInspection(
+                path=directory / _PID_FILE,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                generation=generation,
+                token_absent=isinstance(metadata, dict) and "token" not in metadata,
+            )
+        finally:
+            os.close(pid_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def inspect_legacy_process_tombstone(
+    unit_dir: str | Path,
+) -> LegacyProcessTombstoneInspection:
+    """Inspect legacy metadata, exposing only stable domain failures."""
+    try:
+        return _inspect_legacy_process_tombstone(unit_dir)
+    except ProcessTombstoneError:
+        raise
+    except OSError as exc:
+        raise ProcessTombstoneError("tombstone namespace is absent or unreadable") from exc
+
+
+def _clear_legacy_process_tombstone_locked(
     unit_dir: str | Path, *, unit: str, generation: int,
     expected_sha256: str, workload_fully_gone_asserted: bool,
     operator: str, ticket: str,
@@ -667,13 +737,36 @@ def clear_legacy_process_tombstone(
             or any(c not in "0123456789abcdef" for c in expected_sha256)):
         raise ProcessTombstoneError("expected_sha256 must be a lowercase SHA-256 digest")
 
-    directory = _ensure_unit_dir(unit_dir)
+    directory = Path(unit_dir)
     directory, dir_fd, unit_st = _open_trusted_unit_directory(directory)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        # Every subsequent authorization and mutation is anchored to this one FD.
-        lock_flags = os.O_RDWR | os.O_CREAT | nofollow
-        lock_fd = os.open(".process.lock", lock_flags, 0o600, dir_fd=dir_fd)
+        # Exactly one absent-lock creator publishes a private, durable inode.
+        # A failed publication deliberately leaves the artifact in place: later
+        # callers validate it and fail closed rather than silently replacing it.
+        lock_flags = os.O_RDWR | nofollow
+        created = False
+        try:
+            lock_fd = os.open(
+                ".process.lock", lock_flags | os.O_CREAT | os.O_EXCL,
+                0o600, dir_fd=dir_fd,
+            )
+            created = True
+        except FileExistsError:
+            try:
+                lock_fd = os.open(".process.lock", lock_flags, dir_fd=dir_fd)
+            except OSError as exc:
+                raise ProcessTombstoneError("unit lock is absent or unreadable") from exc
+        except OSError as exc:
+            raise ProcessTombstoneError("unit lock could not be created") from exc
+        if created:
+            try:
+                os.fchmod(lock_fd, 0o600)
+                os.fsync(lock_fd)
+                os.fsync(dir_fd)
+            except OSError as exc:
+                os.close(lock_fd)
+                raise ProcessTombstoneError("unit lock could not be durably published") from exc
         try:
             lst = os.fstat(lock_fd)
             named = os.stat(".process.lock", dir_fd=dir_fd, follow_symlinks=False)
@@ -855,6 +948,26 @@ def clear_legacy_process_tombstone(
     finally:
         os.close(dir_fd)
 
+def clear_legacy_process_tombstone(
+    unit_dir: str | Path, *, unit: str, generation: int,
+    expected_sha256: str, workload_fully_gone_asserted: bool,
+    operator: str, ticket: str,
+) -> Path:
+    """Serialize same-process callers, then use the file lock across processes."""
+    with _LEGACY_CLEARANCE_THREAD_LOCK:
+        try:
+            return _clear_legacy_process_tombstone_locked(
+                unit_dir, unit=unit, generation=generation,
+                expected_sha256=expected_sha256,
+                workload_fully_gone_asserted=workload_fully_gone_asserted,
+                operator=operator, ticket=ticket,
+            )
+        except ProcessTombstoneError:
+            raise
+        except OSError as exc:
+            raise ProcessTombstoneError("legacy tombstone namespace operation failed") from exc
+
+
 def clear_process_tombstone(
     unit_dir: str | Path, *, unit: str, generation: int, token: str,
     workload_fully_gone_asserted: bool, operator: str = "operator",
@@ -964,6 +1077,16 @@ DESIRED_PAUSED = "paused"
 _CORE_STATE_KEYS = frozenset(
     {"schema_version", "unit", "desired", "actual", "generation", "pid"}
 )
+
+
+@dataclass(slots=True, frozen=True)
+class LegacyProcessTombstoneInspection:
+    """Read-only identity of a process tombstone opened in a trusted namespace."""
+
+    path: Path
+    sha256: str
+    generation: int | None
+    token_absent: bool
 
 
 class ProcessTombstoneError(RuntimeError):

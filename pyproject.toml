@@ -1,6 +1,6 @@
 [project]
 name = "datasource-kit"
-version = "0.14.1"
+version = "0.14.2"
 description = "Generic, dependency-free toolkit for managing many datasources (batch reference-data updaters and long-running scraper workers)."
 # Floor rationale - do NOT relax to 3.11:
 # * deliberate policy floor matching current consumers;
