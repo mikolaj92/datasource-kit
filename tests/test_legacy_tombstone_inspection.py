@@ -58,7 +58,7 @@ def test_symlink_and_hardlink_tombstones_fail_closed(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.write_text('{"generation":4}')
     (tmp_path / "pid.json").symlink_to(outside)
-    with pytest.raises((ProcessTombstoneError, OSError)):
+    with pytest.raises(ProcessTombstoneError):
         inspect_legacy_process_tombstone(tmp_path)
     (tmp_path / "pid.json").unlink()
     os.link(outside, tmp_path / "pid.json")
@@ -106,3 +106,43 @@ def test_unit_namespace_swap_fails_closed(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(ProcessTombstoneError, match="unit directory pathname identity changed"):
         inspect_legacy_process_tombstone(unit)
     assert named_unit_checks == 2
+
+
+def test_missing_unit_is_domain_error_and_is_not_created(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(ProcessTombstoneError) as caught:
+        inspect_legacy_process_tombstone(missing)
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("error", [PermissionError(13, "denied"), NotADirectoryError(20, "not dir"), OSError(40, "too many links")])
+def test_namespace_os_errors_are_chained_domain_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError,
+) -> None:
+    real_open = os.open
+    def hostile_open(path: object, *args: object, **kwargs: object) -> int:
+        if path == "pid.json":
+            raise error
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(os, "open", hostile_open)
+    with pytest.raises(ProcessTombstoneError) as caught:
+        inspect_legacy_process_tombstone(tmp_path)
+    assert caught.value.__cause__ is error
+
+
+def test_namespace_baseexception_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_open = os.open
+    class Stop(BaseException):
+        pass
+    marker = Stop()
+    def stop_open(path: object, *args: object, **kwargs: object) -> int:
+        if path == "pid.json":
+            raise marker
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(os, "open", stop_open)
+    with pytest.raises(Stop) as caught:
+        inspect_legacy_process_tombstone(tmp_path)
+    assert caught.value is marker

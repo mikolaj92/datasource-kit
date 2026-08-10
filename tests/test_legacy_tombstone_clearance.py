@@ -11,8 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from datasource_kit import ProcessTombstoneError, clear_legacy_process_tombstone
-from datasource_kit import fleet
+from datasource_kit import ProcessTombstoneError, clear_legacy_process_tombstone, fleet
 
 
 def legacy(path: Path, **changes: object) -> tuple[bytes, str]:
@@ -193,7 +192,7 @@ def test_crash_after_quarantine_link_is_recoverable(tmp_path: Path, monkeypatch:
             raise OSError("simulated crash before source retirement")
         real_unlink(path, *args, **kwargs)
     monkeypatch.setattr(os, "unlink", crash)
-    with pytest.raises(OSError): clear(tmp_path, digest)
+    with pytest.raises(ProcessTombstoneError): clear(tmp_path, digest)
     assert (tmp_path / "pid.json").exists()
     intents = list((tmp_path / "legacy-process-clearance.audit.d").glob("intent-*.json"))
     assert len(intents) == 1
@@ -305,7 +304,7 @@ def test_crash_after_audit_publication_before_temp_unlink_recovers(
             raise OSError("simulated crash after audit link publication")
         real_unlink(path, *args, **kwargs)
     monkeypatch.setattr(os, "unlink", crash)
-    with pytest.raises(OSError):
+    with pytest.raises(ProcessTombstoneError):
         clear(tmp_path, digest)
     audit_dir = tmp_path / "legacy-process-clearance.audit.d"
     intent = next(audit_dir.glob("intent-*.json"))
@@ -342,3 +341,49 @@ def test_audit_directory_swap_is_detected_before_retirement(
     assert list((tmp_path / "audit-preserved").glob("intent-*.json"))
     quarantine = list(tmp_path.glob("*.quarantine"))
     assert len(quarantine) == 1  # conservative hard-link publication remains auditable
+
+
+def test_new_lock_is_normalized_and_durable_before_flock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    events: list[tuple[str, int]] = []
+    real_fchmod, real_fsync, real_flock = os.fchmod, os.fsync, fleet.fcntl.flock
+    monkeypatch.setattr(os, "fchmod", lambda fd, mode: (events.append(("fchmod", mode)), real_fchmod(fd, mode))[1])
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append(("fsync", fd)), real_fsync(fd))[1])
+    monkeypatch.setattr(fleet.fcntl, "flock", lambda fd, op: (events.append(("flock", fd)), real_flock(fd, op))[1])
+    clear(tmp_path, digest)
+    assert events[0] == ("fchmod", 0o600)
+    assert events[1][0] == events[2][0] == "fsync"
+    assert events[1][1] != events[2][1]
+    assert events[3][0] == "flock"
+    assert (tmp_path / ".process.lock").stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_lock_is_validated_without_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    (tmp_path / ".process.lock").write_bytes(b"")
+    os.chmod(tmp_path / ".process.lock", 0o600)
+    real_fchmod = os.fchmod
+    lock_inode = (tmp_path / ".process.lock").stat().st_ino
+    def guarded_fchmod(fd: int, mode: int) -> None:
+        if os.fstat(fd).st_ino == lock_inode:
+            raise AssertionError("must not chmod existing lock")
+        real_fchmod(fd, mode)
+    monkeypatch.setattr(os, "fchmod", guarded_fchmod)
+    clear(tmp_path, digest)
+
+
+def test_lock_publication_failure_is_chained_and_preserves_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, digest = legacy(tmp_path / "pid.json")
+    failure = OSError("disk failure")
+    monkeypatch.setattr(os, "fsync", lambda _fd: (_ for _ in ()).throw(failure))
+    with pytest.raises(ProcessTombstoneError) as caught:
+        clear(tmp_path, digest)
+    assert caught.value.__cause__ is failure
+    assert (tmp_path / ".process.lock").exists()
+    assert (tmp_path / "pid.json").exists()

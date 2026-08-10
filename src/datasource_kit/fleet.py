@@ -648,7 +648,7 @@ def _read_exact_audit(dir_fd: int, name: str, expected: Mapping[str, Any]) -> bo
         os.close(fd)
 
 
-def inspect_legacy_process_tombstone(
+def _inspect_legacy_process_tombstone(
     unit_dir: str | Path,
 ) -> LegacyProcessTombstoneInspection:
     """Inspect a tombstone through the same trusted namespace used for clearance.
@@ -700,6 +700,18 @@ def inspect_legacy_process_tombstone(
         os.close(dir_fd)
 
 
+def inspect_legacy_process_tombstone(
+    unit_dir: str | Path,
+) -> LegacyProcessTombstoneInspection:
+    """Inspect legacy metadata, exposing only stable domain failures."""
+    try:
+        return _inspect_legacy_process_tombstone(unit_dir)
+    except ProcessTombstoneError:
+        raise
+    except OSError as exc:
+        raise ProcessTombstoneError("tombstone namespace is absent or unreadable") from exc
+
+
 def _clear_legacy_process_tombstone_locked(
     unit_dir: str | Path, *, unit: str, generation: int,
     expected_sha256: str, workload_fully_gone_asserted: bool,
@@ -725,29 +737,36 @@ def _clear_legacy_process_tombstone_locked(
             or any(c not in "0123456789abcdef" for c in expected_sha256)):
         raise ProcessTombstoneError("expected_sha256 must be a lowercase SHA-256 digest")
 
-    directory = _ensure_unit_dir(unit_dir)
+    directory = Path(unit_dir)
     directory, dir_fd, unit_st = _open_trusted_unit_directory(directory)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        # Every subsequent authorization and mutation is anchored to this one FD.
-        # Darwin can transiently return ENOENT when several processes race in
-        # open(O_CREAT | O_NOFOLLOW) for the same absent pathname.  Make the
-        # creation race explicit instead: exactly one caller creates, and all
-        # losers open the resulting entry without O_CREAT.
+        # Exactly one absent-lock creator publishes a private, durable inode.
+        # A failed publication deliberately leaves the artifact in place: later
+        # callers validate it and fail closed rather than silently replacing it.
         lock_flags = os.O_RDWR | nofollow
+        created = False
         try:
             lock_fd = os.open(
                 ".process.lock", lock_flags | os.O_CREAT | os.O_EXCL,
                 0o600, dir_fd=dir_fd,
             )
+            created = True
         except FileExistsError:
             try:
                 lock_fd = os.open(".process.lock", lock_flags, dir_fd=dir_fd)
-            except FileNotFoundError as exc:
-                # A disappearing lock is a namespace violation, not a raw OS
-                # error.  Same-euid removal is outside the trust boundary, but
-                # public callers must still fail closed predictably.
-                raise ProcessTombstoneError("unit lock pathname identity changed") from exc
+            except OSError as exc:
+                raise ProcessTombstoneError("unit lock is absent or unreadable") from exc
+        except OSError as exc:
+            raise ProcessTombstoneError("unit lock could not be created") from exc
+        if created:
+            try:
+                os.fchmod(lock_fd, 0o600)
+                os.fsync(lock_fd)
+                os.fsync(dir_fd)
+            except OSError as exc:
+                os.close(lock_fd)
+                raise ProcessTombstoneError("unit lock could not be durably published") from exc
         try:
             lst = os.fstat(lock_fd)
             named = os.stat(".process.lock", dir_fd=dir_fd, follow_symlinks=False)
@@ -936,12 +955,17 @@ def clear_legacy_process_tombstone(
 ) -> Path:
     """Serialize same-process callers, then use the file lock across processes."""
     with _LEGACY_CLEARANCE_THREAD_LOCK:
-        return _clear_legacy_process_tombstone_locked(
-            unit_dir, unit=unit, generation=generation,
-            expected_sha256=expected_sha256,
-            workload_fully_gone_asserted=workload_fully_gone_asserted,
-            operator=operator, ticket=ticket,
-        )
+        try:
+            return _clear_legacy_process_tombstone_locked(
+                unit_dir, unit=unit, generation=generation,
+                expected_sha256=expected_sha256,
+                workload_fully_gone_asserted=workload_fully_gone_asserted,
+                operator=operator, ticket=ticket,
+            )
+        except ProcessTombstoneError:
+            raise
+        except OSError as exc:
+            raise ProcessTombstoneError("legacy tombstone namespace operation failed") from exc
 
 
 def clear_process_tombstone(
