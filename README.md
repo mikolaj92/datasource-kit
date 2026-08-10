@@ -417,3 +417,10 @@ handle; no numeric-PID signalling, escalation, adoption, guardian cleanup, or re
 performed. After externally proving the entire workload is gone, an operator may call
 `clear_process_tombstone` with the exact identity and explicit assertion; clearance is
 audited before replacement becomes eligible.
+
+For pre-token legacy metadata only, `clear_legacy_process_tombstone` is the narrower
+operator migration. It requires exact unit/generation, the SHA-256 of the exact
+`pid.json` bytes, a workload-gone assertion, operator, and ticket. It never probes or
+signals a process. The function durably audits the clearance, then atomically moves the
+tombstone to a private, uniquely named quarantine which is retained for manual review.
+Identical retries verify the audit and quarantine and return idempotently.

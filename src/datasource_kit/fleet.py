@@ -16,6 +16,7 @@ Boundaries
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -42,6 +43,7 @@ __all__ = [
     "stop",
     "stop_process",
     "clear_process_tombstone",
+    "clear_legacy_process_tombstone",
     "ProcessTombstoneError",
     # DesiredStateReconciler face
     "DesiredStateReconciler",
@@ -450,6 +452,408 @@ def stop(unit_dir: str | Path, *, timeout: float = _DEFAULT_TIMEOUT) -> StopResu
     write_json_atomic(path, data)
     return StopResult(int(pid or 0), signalled, False, False)
 
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _validate_trusted_directory(st: os.stat_result, *, unit: bool) -> None:
+    """Validate the clearance namespace threat boundary.
+
+    The caller's euid is trusted.  Same-euid code is deliberately out of scope:
+    it can replace this package and its state.  Root-owned ancestors are trusted;
+    a writable root-owned ancestor is accepted only with the sticky bit (the
+    normal /tmp-style namespace protection).  Group/other-writable unit and
+    non-root ancestor directories are rejected.
+    """
+    import stat
+    euid = os.geteuid()
+    if not stat.S_ISDIR(st.st_mode):
+        raise ProcessTombstoneError("clearance namespace component is not a directory")
+    if unit:
+        if st.st_uid != euid or st.st_mode & 0o022:
+            raise ProcessTombstoneError("unit directory must be euid-owned and not group/world writable")
+    elif st.st_uid not in {0, euid}:
+        raise ProcessTombstoneError("clearance ancestor has an untrusted owner")
+    elif st.st_mode & 0o022 and not (st.st_uid == 0 and st.st_mode & stat.S_ISVTX):
+        raise ProcessTombstoneError("clearance ancestor is group/world writable")
+
+
+def _open_trusted_unit_directory(directory: Path) -> tuple[Path, int, os.stat_result]:
+    """Open every absolute pathname component with NOFOLLOW and retain unit FD."""
+    absolute = Path(os.path.abspath(os.fspath(directory)))
+    parts = absolute.parts
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(parts[0], flags)
+    try:
+        _validate_trusted_directory(os.fstat(fd), unit=False)
+        for index, part in enumerate(parts[1:], 1):
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            _validate_trusted_directory(os.fstat(fd), unit=index == len(parts) - 1)
+        st = os.fstat(fd)
+        named = os.stat(absolute, follow_symlinks=False)
+        if not _same_inode(st, named):
+            raise ProcessTombstoneError("unit directory pathname identity changed")
+        return absolute, fd, st
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _bind_named_directory(dir_fd: int, opened: os.stat_result, name: str | Path,
+                          *, message: str) -> None:
+    try:
+        named = os.stat(name, dir_fd=dir_fd if isinstance(name, str) else None,
+                        follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise ProcessTombstoneError(message) from exc
+    if not _same_inode(opened, named):
+        raise ProcessTombstoneError(message)
+
+
+def _bind_clearance_namespace(directory: Path, dir_fd: int, unit_st: os.stat_result,
+                              lock_st: os.stat_result, audit_fd: int,
+                              audit_st: os.stat_result, audit_name: str) -> None:
+    _bind_named_directory(dir_fd, unit_st, directory, message="unit directory pathname identity changed")
+    _bind_named_directory(dir_fd, lock_st, ".process.lock", message="unit lock pathname identity changed")
+    _bind_named_directory(dir_fd, audit_st, audit_name, message="audit directory pathname identity changed")
+    if not _same_inode(audit_st, os.fstat(audit_fd)):
+        raise ProcessTombstoneError("audit directory descriptor identity changed")
+
+def _read_regular_fd(fd: int, *, limit: int = 16 * 1024 * 1024) -> bytes:
+    """Read a small regular file from its already validated descriptor."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(1024 * 1024, limit + 1 - size))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            raise ProcessTombstoneError("tombstone is unreasonably large")
+
+
+def _safe_internal_basename(name: object, *, prefix: str, suffix: str) -> str:
+    """Accept only the exact single-component names this module generates."""
+    if (not isinstance(name, str) or len(name) > 255 or not name.startswith(prefix)
+            or not name.endswith(suffix) or name in {".", ".."}
+            or "/" in name or (os.altsep is not None and os.altsep in name)):
+        raise ProcessTombstoneError("invalid internal clearance artifact name")
+    return name
+
+
+def _open_private_named(name: str, *, dir_fd: int, directory: bool = False,
+                        allowed_nlinks: tuple[int, ...] = (1,)) -> tuple[int, os.stat_result]:
+    import stat
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(name, flags, dir_fd=dir_fd)
+    st = os.fstat(fd)
+    named = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    kind_ok = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    # A directory normally has two links; only regular audit/lock files must be nlink 1.
+    if (not kind_ok or st.st_uid != os.geteuid()
+            or (not directory and st.st_nlink not in allowed_nlinks) or st.st_mode & 0o077
+            or (st.st_dev, st.st_ino) != (named.st_dev, named.st_ino)):
+        os.close(fd)
+        raise ProcessTombstoneError("clearance artifact must be private and named by its opened inode")
+    return fd, st
+
+
+def _atomic_private_json(dir_fd: int, final: str, value: Mapping[str, Any]) -> None:
+    """Publish one immutable audit record; abandoned dot-tmp files are ignored."""
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if len(raw) > 8192:
+        raise ProcessTombstoneError("clearance audit record is too large")
+    tmp = f".tmp-{uuid.uuid4().hex}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o600, dir_fd=dir_fd)
+    try:
+        offset = 0
+        while offset < len(raw):
+            wrote = os.write(fd, raw[offset:])
+            if wrote <= 0:
+                raise OSError("short write to clearance audit")
+            offset += wrote
+        os.fsync(fd)
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        # link is the portable, atomic NOREPLACE publication primitive.
+        os.link(tmp, final, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+        os.fsync(dir_fd)
+        published = os.stat(final, dir_fd=dir_fd, follow_symlinks=False)
+        opened = os.fstat(fd)
+        if (published.st_dev, published.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ProcessTombstoneError("published audit pathname identity changed")
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+            os.fsync(dir_fd)
+        except FileNotFoundError:
+            pass
+
+
+
+def _recover_audit_link(fd: int, opened: os.stat_result, dir_fd: int) -> None:
+    if opened.st_nlink != 2:
+        return
+    candidates: list[str] = []
+    for entry in os.listdir(dir_fd):
+        if (len(entry) == 37 and entry.startswith(".tmp-")
+                and all(c in "0123456789abcdef" for c in entry[5:])):
+            est = os.stat(entry, dir_fd=dir_fd, follow_symlinks=False)
+            if _same_inode(opened, est):
+                candidates.append(entry)
+    if len(candidates) != 1:
+        raise ProcessTombstoneError("published audit has unexpected extra links")
+    os.unlink(candidates[0], dir_fd=dir_fd)
+    os.fsync(dir_fd)
+    if os.fstat(fd).st_nlink != 1:
+        raise ProcessTombstoneError("published audit has unexpected extra links")
+
+def _read_exact_audit(dir_fd: int, name: str, expected: Mapping[str, Any]) -> bool:
+    try:
+        fd, opened = _open_private_named(name, dir_fd=dir_fd, allowed_nlinks=(1, 2))
+    except FileNotFoundError:
+        return False
+    try:
+        _recover_audit_link(fd, opened, dir_fd)
+        raw = _read_regular_fd(fd, limit=8192)
+        try:
+            actual = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProcessTombstoneError("clearance audit record is malformed") from exc
+        if actual != dict(expected):
+            raise ProcessTombstoneError("clearance audit record does not match request")
+        # Bind the official directory entry to the descriptor used above.
+        named = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        opened = os.fstat(fd)
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ProcessTombstoneError("clearance audit pathname identity changed")
+        return True
+    finally:
+        os.close(fd)
+
+
+def clear_legacy_process_tombstone(
+    unit_dir: str | Path, *, unit: str, generation: int,
+    expected_sha256: str, workload_fully_gone_asserted: bool,
+    operator: str, ticket: str,
+) -> Path:
+    """Durably quarantine a tokenless legacy tombstone, without signalling.
+
+    Audit is an append-only *set* of individually atomic files in private
+    ``legacy-process-clearance.audit.d``.  JSONL is deliberately not used:
+    incomplete temporary files are unreferenced and harmless after a crash.
+    """
+    import stat
+
+    _validate_unit(unit)
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        raise ProcessTombstoneError("generation must be an integer")
+    if workload_fully_gone_asserted is not True:
+        raise ProcessTombstoneError("explicit workload-gone assertion is required")
+    for label, value, limit in (("operator", operator, 256), ("ticket", ticket, 512)):
+        if not isinstance(value, str) or not value.strip() or len(value.encode()) > limit:
+            raise ProcessTombstoneError(f"nonempty bounded {label} is required")
+    if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in expected_sha256)):
+        raise ProcessTombstoneError("expected_sha256 must be a lowercase SHA-256 digest")
+
+    directory = _ensure_unit_dir(unit_dir)
+    directory, dir_fd, unit_st = _open_trusted_unit_directory(directory)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        # Every subsequent authorization and mutation is anchored to this one FD.
+        lock_flags = os.O_RDWR | os.O_CREAT | nofollow
+        lock_fd = os.open(".process.lock", lock_flags, 0o600, dir_fd=dir_fd)
+        try:
+            lst = os.fstat(lock_fd)
+            named = os.stat(".process.lock", dir_fd=dir_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(lst.st_mode) or lst.st_uid != os.geteuid()
+                    or lst.st_nlink != 1 or lst.st_mode & 0o077
+                    or (lst.st_dev, lst.st_ino) != (named.st_dev, named.st_ino)):
+                raise ProcessTombstoneError("unit lock must be a private regular named file")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+            audit_dir_name = "legacy-process-clearance.audit.d"
+            try:
+                os.mkdir(audit_dir_name, 0o700, dir_fd=dir_fd)
+                os.fsync(dir_fd)
+            except FileExistsError:
+                pass
+            audit_fd, audit_st = _open_private_named(audit_dir_name, dir_fd=dir_fd, directory=True)
+            try:
+                _bind_clearance_namespace(directory, dir_fd, unit_st, lst,
+                                          audit_fd, audit_st, audit_dir_name)
+                index_fields = {"version": 2, "unit": unit, "generation": generation,
+                    "operator": operator, "ticket": ticket,
+                    "tombstone_sha256": expected_sha256,
+                    "asserted_workload_fully_gone": True}
+                canonical = json.dumps(index_fields, sort_keys=True, separators=(",", ":")).encode()
+                op_id = hashlib.sha256(canonical).hexdigest()
+                intent_name = f"intent-{op_id}.json"
+                complete_name = f"complete-{op_id}.json"
+                quarantine = f".legacy-pid.{expected_sha256}.{uuid.uuid4().hex}.quarantine"
+                _safe_internal_basename(quarantine, prefix=".legacy-pid.", suffix=".quarantine")
+
+                # An existing intent is authoritative only after exact validation.
+                try:
+                    ifd, ist = _open_private_named(intent_name, dir_fd=audit_fd,
+                                                       allowed_nlinks=(1, 2))
+                    _recover_audit_link(ifd, ist, audit_fd)
+                except FileNotFoundError:
+                    intent = dict(index_fields, event="legacy_tombstone_clearance_intent",
+                                  operation_id=op_id, quarantine=quarantine)
+                    existing_intent = False
+                else:
+                    try:
+                        try: intent = json.loads(_read_regular_fd(ifd, limit=8192))
+                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                            raise ProcessTombstoneError("clearance intent is malformed") from exc
+                        ist = os.fstat(ifd)
+                        inamed = os.stat(intent_name, dir_fd=audit_fd, follow_symlinks=False)
+                        if (ist.st_dev, ist.st_ino) != (inamed.st_dev, inamed.st_ino):
+                            raise ProcessTombstoneError("clearance intent pathname identity changed")
+                    finally: os.close(ifd)
+                    if not isinstance(intent, dict):
+                        raise ProcessTombstoneError("clearance intent is malformed")
+                    expected_part = dict(index_fields, event="legacy_tombstone_clearance_intent",
+                                         operation_id=op_id, quarantine=intent.get("quarantine"))
+                    if intent != expected_part:
+                        raise ProcessTombstoneError("clearance intent does not match request")
+                    quarantine = _safe_internal_basename(intent.get("quarantine"),
+                        prefix=".legacy-pid.", suffix=".quarantine")
+                    existing_intent = True
+                completion = dict(intent, event="legacy_tombstone_clearance_complete")
+                if _read_exact_audit(audit_fd, complete_name, completion):
+                    # A completion can never authorize ignoring a live pid.json.
+                    # Such a state is inconsistent (or forged), so fail closed.
+                    try:
+                        os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ProcessTombstoneError("completion exists while tombstone is present")
+                    qfd, qst = _open_private_named(quarantine, dir_fd=dir_fd)
+                    try:
+                        if hashlib.sha256(_read_regular_fd(qfd)).hexdigest() != expected_sha256:
+                            raise ProcessTombstoneError("completed quarantine does not match")
+                    finally: os.close(qfd)
+                    _bind_clearance_namespace(directory, dir_fd, unit_st, lst,
+                                              audit_fd, audit_st, audit_dir_name)
+                    cst = os.stat(complete_name, dir_fd=audit_fd, follow_symlinks=False)
+                    path = directory / audit_dir_name / complete_name
+                    _bind_named_directory(audit_fd, cst, complete_name,
+                                          message="completion pathname identity changed")
+                    if not _same_inode(cst, os.stat(path, follow_symlinks=False)):
+                        raise ProcessTombstoneError("returned audit pathname identity changed")
+                    return path
+
+                try:
+                    pid_fd = os.open(_PID_FILE, os.O_RDONLY | nofollow, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    if not existing_intent:
+                        raise ProcessTombstoneError("tombstone absent and no matching intent")
+                    qfd, _ = _open_private_named(quarantine, dir_fd=dir_fd)
+                    try:
+                        if hashlib.sha256(_read_regular_fd(qfd)).hexdigest() != expected_sha256:
+                            raise ProcessTombstoneError("intended quarantine does not match")
+                    finally: os.close(qfd)
+                else:
+                    try:
+                        pst = os.fstat(pid_fd)
+                        raw = _read_regular_fd(pid_fd)
+                        # nlink 2 is accepted only for recovery of our already-published intent/link.
+                        if (not stat.S_ISREG(pst.st_mode) or pst.st_nlink not in ({1, 2} if existing_intent else {1})
+                                or hashlib.sha256(raw).hexdigest() != expected_sha256):
+                            raise ProcessTombstoneError("tombstone identity or SHA-256 does not match")
+                        if pst.st_nlink == 2:
+                            try:
+                                recovery_q = os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+                            except FileNotFoundError as exc:
+                                raise ProcessTombstoneError("shared tombstone is not our recovery link") from exc
+                            if (recovery_q.st_dev, recovery_q.st_ino) != (pst.st_dev, pst.st_ino):
+                                raise ProcessTombstoneError("shared tombstone is not our recovery link")
+                        try: data = json.loads(raw)
+                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                            raise ProcessTombstoneError("legacy tombstone is malformed") from exc
+                        if (not isinstance(data, dict) or "token" in data
+                                or type(data.get("unit")) is not str or data.get("unit") != unit
+                                or type(data.get("generation")) is not int or data.get("generation") != generation):
+                            raise ProcessTombstoneError("tombstone is not tokenless exact legacy metadata")
+                        pathst = os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+                        if (pathst.st_dev, pathst.st_ino) != (pst.st_dev, pst.st_ino):
+                            raise ProcessTombstoneError("tombstone pathname identity changed")
+                        os.fchmod(pid_fd, 0o600)
+                        os.fsync(pid_fd)
+                        if not existing_intent:
+                            _atomic_private_json(audit_fd, intent_name, intent)
+                            existing_intent = True
+                        try:
+                            os.link(_PID_FILE, quarantine, src_dir_fd=dir_fd,
+                                    dst_dir_fd=dir_fd, follow_symlinks=False)
+                            os.fsync(dir_fd)
+                        except FileExistsError:
+                            qst = os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+                            if (qst.st_dev, qst.st_ino) != (pst.st_dev, pst.st_ino):
+                                raise ProcessTombstoneError("quarantine collision")
+                        qfd, qst = _open_private_named(quarantine, dir_fd=dir_fd, allowed_nlinks=(1, 2))
+                        try:
+                            if (qst.st_dev, qst.st_ino) != (pst.st_dev, pst.st_ino):
+                                raise ProcessTombstoneError("quarantine inode mismatch")
+                            os.fsync(qfd)
+                        finally: os.close(qfd)
+                        # Last authorization check before the irreversible retirement.
+                        _bind_clearance_namespace(directory, dir_fd, unit_st, lst,
+                                                  audit_fd, audit_st, audit_dir_name)
+                        current = os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+                        if not _same_inode(pst, current):
+                            raise ProcessTombstoneError("tombstone pathname identity changed")
+                        os.unlink(_PID_FILE, dir_fd=dir_fd)
+                        os.fsync(dir_fd)
+                    finally: os.close(pid_fd)
+
+                # Verify post-retirement invariant before publishing completion.
+                qfd, qst = _open_private_named(quarantine, dir_fd=dir_fd)
+                try:
+                    if qst.st_nlink != 1 or hashlib.sha256(_read_regular_fd(qfd)).hexdigest() != expected_sha256:
+                        raise ProcessTombstoneError("retired quarantine invariant failed")
+                    os.fsync(qfd)
+                finally: os.close(qfd)
+                _atomic_private_json(audit_fd, complete_name, completion)
+                # Completion is valid only after source absence and exact quarantine,
+                # with all public namespace entries still bound to opened inodes.
+                try:
+                    os.stat(_PID_FILE, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ProcessTombstoneError("completion published while tombstone is present")
+                _bind_clearance_namespace(directory, dir_fd, unit_st, lst,
+                                          audit_fd, audit_st, audit_dir_name)
+                cfd, cst = _open_private_named(complete_name, dir_fd=audit_fd)
+                try:
+                    path = directory / audit_dir_name / complete_name
+                    if not _same_inode(cst, os.stat(path, follow_symlinks=False)):
+                        raise ProcessTombstoneError("returned audit pathname identity changed")
+                finally:
+                    os.close(cfd)
+                return path
+            finally:
+                os.close(audit_fd)
+        finally:
+            try: fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally: os.close(lock_fd)
+    finally:
+        os.close(dir_fd)
 
 def clear_process_tombstone(
     unit_dir: str | Path, *, unit: str, generation: int, token: str,
