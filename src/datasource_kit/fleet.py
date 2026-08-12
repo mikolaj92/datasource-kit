@@ -360,7 +360,8 @@ def spawn_process(
         raise
     finally:
         parent_fd.close()
-    deadline = started_at + probe_window
+    # Probe after ACK only: handshake time must not consume the crash window.
+    deadline = time.time() + probe_window
     while time.time() < deadline:
         if proc.poll() is not None:
             if _OWNED_HANDLES.get(token) is proc:
