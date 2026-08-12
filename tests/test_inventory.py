@@ -24,7 +24,7 @@ def _make_plugin_package(root: Path, package: str) -> None:
     pkg_dir = root / package
     _write(pkg_dir / "__init__.py", "")
 
-    # Autonomous scraper declared via the first-class execution model.
+    # Autonomous scraper: first-class ExecutionModel only (no legacy boolean).
     _write(
         pkg_dir / "eli" / "__init__.py",
         "",
@@ -42,7 +42,7 @@ def _make_plugin_package(root: Path, package: str) -> None:
         ),
     )
 
-    # Autonomous scraper declared via the first-class execution model.
+    # Autonomous scraper with step_ref on the first-class execution model.
     _write(pkg_dir / "saos" / "__init__.py", "")
     _write(
         pkg_dir / "saos" / "manifest.py",
@@ -90,17 +90,20 @@ def test_fleet_inventory_reads_capability_flags(plugin_pkg: str):
     assert eli.is_autonomous is True
     assert eli.has_contract is True
     assert eli.execution_model == EXECUTION_AUTONOMOUS
+    assert eli.manifest.execution is not None
+    assert eli.manifest.execution.model == EXECUTION_AUTONOMOUS
     assert eli.rate_limit == {"rps": 2.0}
 
     assert saos.is_autonomous is True
     assert saos.has_contract is True
-    assert saos.execution_model == "autonomous"
+    assert saos.execution_model == EXECUTION_AUTONOMOUS
     assert saos.manifest.execution is not None
     assert saos.manifest.execution.step_ref == "saos.worker:run"
 
     assert clp.is_autonomous is False
     assert clp.has_contract is False
     assert clp.execution_model == ""
+    assert clp.manifest.execution is None
 
 
 def test_fleet_inventory_preserves_requested_order(plugin_pkg: str):

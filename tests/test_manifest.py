@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pytest
 
 from datasource_kit import EXECUTION_AUTONOMOUS, ExecutionModel, Manifest, SourceContract
@@ -20,6 +22,7 @@ def test_batch_manifest_minimal():
     assert m.priority == 50
     assert m.rate_limit == {}
     assert m.contract is None
+    assert m.execution is None
 
 
 def test_autonomous_manifest_requires_contract():
@@ -42,6 +45,8 @@ def test_autonomous_manifest_with_contract_ok():
     )
     assert m.contract is contract
     assert m.contract.coverage_unit == "source_defined"
+    assert m.is_autonomous is True
+    assert m.execution_model == EXECUTION_AUTONOMOUS
 
 
 def test_batch_manifest_is_not_autonomous():
@@ -49,6 +54,43 @@ def test_batch_manifest_is_not_autonomous():
     assert m.is_autonomous is False
     assert m.execution is None
     assert m.execution_model == ""
+
+
+def test_manifest_has_no_legacy_supports_autonomous_field():
+    """Modern contract: autonomy is first-class ``execution`` only (#42)."""
+
+    assert "supports_autonomous" not in {f.name for f in fields(Manifest)}
+    with pytest.raises(TypeError, match="supports_autonomous"):
+        Manifest(
+            name="saos",
+            source_type="scraper",
+            supports_autonomous=True,  # type: ignore[call-arg]
+            contract=_contract(),
+        )
+
+
+def test_is_autonomous_follows_execution_model_only():
+    bare = Manifest(name="clp", source_type="batch")
+    assert bare.is_autonomous is False
+
+    other = Manifest(
+        name="clp",
+        source_type="batch",
+        execution=ExecutionModel(model="batch"),
+    )
+    assert other.is_autonomous is False
+    assert other.execution_model == "batch"
+
+    auto = Manifest(
+        name="saos",
+        source_type="scraper",
+        execution=ExecutionModel(model=EXECUTION_AUTONOMOUS, step_ref="saos.worker:run"),
+        contract=_contract(),
+    )
+    assert auto.is_autonomous is True
+    assert auto.execution_model == EXECUTION_AUTONOMOUS
+    assert auto.execution is not None
+    assert auto.execution.step_ref == "saos.worker:run"
 
 
 def test_execution_model_requires_label():
