@@ -61,8 +61,10 @@ class Manifest:
     so batch sources can leave it empty and scraper sources can populate it.
     An autonomous source must declare a :class:`SourceContract`.
 
-    ``execution`` states how the source runs. An autonomous source declares
-    ``execution=ExecutionModel(EXECUTION_AUTONOMOUS, ...)`` and a contract.
+    ``execution`` is the sole, canonical signal for how the source runs.
+    An autonomous source declares
+    ``execution=ExecutionModel(EXECUTION_AUTONOMOUS, ...)`` and a contract;
+    there is no alternate boolean or fallback path.
     """
 
     name: str
@@ -82,7 +84,11 @@ class Manifest:
 
     @property
     def is_autonomous(self) -> bool:
-        """Whether ``execution`` declares the autonomous execution model."""
+        """Whether ``execution.model`` is :data:`EXECUTION_AUTONOMOUS`.
+
+        Derived only from the first-class :attr:`execution` field; there is no
+        legacy boolean or secondary signal.
+        """
 
         return self.execution is not None and self.execution.model == EXECUTION_AUTONOMOUS
 
