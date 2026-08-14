@@ -25,6 +25,9 @@ fala = ["fala @ git+https://github.com/mikolaj92/Fala.git@v0.7.21"]
 profiles = ["pyyaml>=6.0"]
 # Optional FastAPI control-plane router; the core stays HTTP-framework-free.
 fastapi = ["fastapi"]
+# Published extra so `uv run --extra dev pytest` can resolve the suite.
+# The matching dependency-group keeps CI (`uv run --group dev`) unchanged.
+dev = ["pytest>=8.0", "fastapi", "httpx"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "fastapi", "httpx"]
