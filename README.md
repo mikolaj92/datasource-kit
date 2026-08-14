@@ -358,6 +358,11 @@ pip install "datasource-kit[profiles]"   # YAML profile loading
 pip install "datasource-kit[fala]"       # Fala execution + artifact adapters
 ```
 
+The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
+from GitHub at the `v0.7.21` tag (`record_in_process`). Fala is not published
+to PyPI; the extra carries a PEP 508 git URL so `pip` does not resolve the
+unrelated PyPI project named `fala`.
+
 ## Minimal Batch Usage
 
 ```python
