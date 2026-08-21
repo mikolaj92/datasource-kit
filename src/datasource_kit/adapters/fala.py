@@ -22,7 +22,7 @@ _EXECUTION_INSTALL_HINT = (
     "FalaExecutionBackend requires the 'fala' extra: pip install datasource-kit[fala]"
 )
 _EXECUTION_CAPABILITY_ERROR = (
-    "FalaExecutionBackend requires Fala 0.7.21 or newer with the public "
+    "FalaExecutionBackend requires Fala 0.7.28 or newer with the public "
     "record_in_process API"
 )
 _BLOB_KIND = "blob"
