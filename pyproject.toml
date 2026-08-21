@@ -1,6 +1,6 @@
 [project]
 name = "datasource-kit"
-version = "0.14.2"
+version = "0.14.3"
 description = "Generic, dependency-free toolkit for managing many datasources (batch reference-data updaters and long-running scraper workers)."
 # Floor rationale - do NOT relax to 3.11:
 # * deliberate policy floor matching current consumers;
@@ -19,8 +19,8 @@ datasource-kit = "datasource_kit.cli:main"
 # Blob/artifact resolution and in-process journal recording only.
 # Fala is GitHub-only (name = "fala"); the PEP 508 URL keeps pip off the
 # unrelated PyPI project of the same name. Adapter needs record_in_process
-# (Fala 0.7.21+).
-fala = ["fala @ git+https://github.com/mikolaj92/Fala.git@v0.7.21"]
+# (Fala 0.7.28+).
+fala = ["fala @ git+https://github.com/mikolaj92/Fala.git@v0.7.28"]
 # YAML profile loading only; JSON profiles are the dep-free default.
 profiles = ["pyyaml>=6.0"]
 # Optional FastAPI control-plane router; the core stays HTTP-framework-free.
@@ -33,7 +33,7 @@ dev = ["pytest>=8.0", "fastapi", "httpx"]
 dev = ["pytest>=8.0", "fastapi", "httpx"]
 
 [tool.uv.sources]
-fala = { git = "https://github.com/mikolaj92/Fala", tag = "v0.7.21" }
+fala = { git = "https://github.com/mikolaj92/Fala", tag = "v0.7.28" }
 
 [build-system]
 requires = ["hatchling"]

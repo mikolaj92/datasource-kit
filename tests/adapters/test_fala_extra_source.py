@@ -6,7 +6,7 @@ from typing import Final
 
 _ROOT: Final = Path(__file__).resolve().parents[2]
 _FALA_GIT: Final = "https://github.com/mikolaj92/Fala"
-_FALA_TAG: Final = "v0.7.21"
+_FALA_TAG: Final = "v0.7.28"
 _FALA_EXTRA: Final = f"fala @ git+{_FALA_GIT}.git@{_FALA_TAG}"
 
 

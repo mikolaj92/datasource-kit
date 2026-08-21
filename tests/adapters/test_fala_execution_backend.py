@@ -15,7 +15,7 @@ _INSTALL_HINT: Final = (
     "FalaExecutionBackend requires the 'fala' extra: pip install datasource-kit[fala]"
 )
 _CAPABILITY_ERROR: Final = (
-    "FalaExecutionBackend requires Fala 0.7.21 or newer with the public "
+    "FalaExecutionBackend requires Fala 0.7.28 or newer with the public "
     "record_in_process API"
 )
 
