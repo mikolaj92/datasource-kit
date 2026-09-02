@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,7 @@ from .completeness import CompletenessReport
 
 __all__ = ["IngestReport"]
 
-# Keep in sync with datasource_kit version string if one is added.
-_KIT_VERSION = "0.14.0"
+_KIT_VERSION = version("datasource-kit")
 
 
 @dataclass
@@ -57,7 +57,7 @@ class IngestReport:
         )
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "IngestReport":
+    def from_dict(cls, d: dict[str, Any]) -> IngestReport:
         completeness_raw = d.get("completeness", {})
         return cls(
             source_name=d.get("source_name", d.get("source", "")),
@@ -79,6 +79,6 @@ class IngestReport:
         )
 
     @classmethod
-    def load_json(cls, path: str | Path) -> "IngestReport":
+    def load_json(cls, path: str | Path) -> IngestReport:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls.from_dict(raw)

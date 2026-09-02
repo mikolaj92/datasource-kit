@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
-from typing import TypeVar
 
-__all__ = ["TokenBucket", "with_retry"]
-
-T = TypeVar("T")
+__all__ = ["TokenBucket"]
 
 
 class TokenBucket:
@@ -69,28 +65,3 @@ class TokenBucket:
         """Compatibility wrapper for the older API."""
 
         self.acquire(amount)
-
-
-def with_retry(
-    fn: Callable[[], T],
-    *,
-    attempts: int,
-    base_delay: float,
-    max_delay: float,
-    retry_on: tuple[type[Exception], ...] = (Exception,),
-) -> T:
-    """Retry ``fn`` with exponential backoff and re-raise the last error."""
-
-    if attempts < 1:
-        raise ValueError("attempts must be >= 1")
-    last: Exception | None = None
-    for index in range(attempts):
-        try:
-            return fn()
-        except retry_on as exc:
-            last = exc
-            if index == attempts - 1:
-                break
-            time.sleep(min(max_delay, base_delay * (2**index)))
-    assert last is not None
-    raise last

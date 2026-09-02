@@ -11,8 +11,9 @@ from .completeness import CompletenessReport, LayerCoverage
 from .errors import RuntimeStepError
 from .profile import SourceProfile, load_profile, validate_source
 from .providers import ProviderRegistry, builtin_registry
-from .ratelimit import TokenBucket, with_retry
+from .ratelimit import TokenBucket
 from .report import IngestReport
+from .retry import retry
 
 __all__ = ["run_ingest"]
 
@@ -55,11 +56,14 @@ def run_ingest(
             rate_limit_waits += throttle.acquire()
             attempts = {"count": 0}
 
-            def fetch_once() -> list[dict[str, Any]]:
-                attempts["count"] += 1
-                return fetcher(window, policies.get("fetcher", {}))
+            def fetch_once(
+                current_window: Any = window,
+                counter: dict[str, int] = attempts,
+            ) -> list[dict[str, Any]]:
+                counter["count"] += 1
+                return fetcher(current_window, policies.get("fetcher", {}))
 
-            raw = with_retry(fetch_once, **retry_policy)
+            raw = retry(fetch_once, **retry_policy)
             retries_used += max(attempts["count"] - 1, 0)
             mapped = mapper(raw, policies.get("mapper", {}))
             valid, invalid = _valid_records(mapped)
@@ -86,7 +90,7 @@ def run_ingest(
                 store.upsert(all_fetched)
             else:
                 store.save(all_fetched)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise RuntimeStepError(f"persist failed: {exc}") from exc
 
     assessment = assessor(all_fetched, windows[-1], policies.get("assess", {})) if windows else {}
@@ -120,9 +124,10 @@ def _retry_policy(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
     return {
-        "attempts": int(raw.get("attempts", 1)),
-        "base_delay": float(raw.get("base_delay", 0.0)),
-        "max_delay": float(raw.get("max_delay", 0.0)),
+        "retries": int(raw.get("retries", 1)),
+        "backoff_seconds": float(raw.get("backoff_seconds", 0.0)),
+        "backoff": str(raw.get("backoff", "exponential")),
+        "max_backoff_seconds": float(raw.get("max_backoff_seconds", 0.0)),
     }
 
 

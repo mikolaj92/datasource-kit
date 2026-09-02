@@ -35,7 +35,7 @@ enumerate -> fetch -> persist -> diff -> assess -> report
  loop      evidence  only       replace  status     CompletenessReport
 ```
 
-`run_ingest()` wires `TokenBucket` throttling and `with_retry` around registered
+`run_ingest()` wires `TokenBucket` throttling and public `retry()` around registered
 provider hooks. The profile chooses provider names such as `diff.by_id`,
 `diff.full_replace`, and `assess.passthrough`; the registry resolves them
 fail-closed before the run starts.
@@ -88,10 +88,14 @@ primitives for long-lived worker OS processes:
   generation injection, and opaque JSON pid metadata.
 - `spawn(spec) -> SpawnResult` -- starts a subprocess with `start_new_session`,
   writes pid.json atomically, and performs a fail-closed immediate-exit probe.
-- `stop(unit_dir, timeout) -> StopResult` -- SIGTERM to the process group,
-  escalates to SIGKILL after timeout; cleans up stale pid files.
-- `liveness(unit_dir) -> Liveness` -- returns `"running"`, `"stopped"`, or
-  `"stale"` from pid.json and OS-level checks.
+- `stop(unit_dir, timeout) -> StopResult` -- requests cooperative termination
+  only through the live `Popen` handle owned by this supervisor. It never sends
+  SIGKILL and never clears the process tombstone.
+- `stop_process(pid)` -- rejected numeric-PID primitive; always raises
+  `ProcessTombstoneError` because a PID cannot prove process identity.
+- `liveness(unit_dir) -> Liveness` -- reports the tombstone-aware observation;
+  a persisted `pid.json` is not treated as proof that a matching process is safe
+  to signal.
 
 POSIX only. No scheduler, no cron, no daemon -- these are primitives; policy
 stays in the consuming project.

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from datasource_kit.cli import main, EXAMPLE_ROOT
+from datasource_kit.cli import EXAMPLE_ROOT, main
 from datasource_kit.providers import builtin_registry
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,7 +141,8 @@ def test_explain(demo_scraper: Path, tmp_path: Path, capsys: pytest.CaptureFixtu
     assert rc == 0
     captured = capsys.readouterr()
     assert "source_name" in captured.out
-    assert "kit_version" in captured.out
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert f"kit_version:      {project['project']['version']}" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -197,3 +198,12 @@ def test_builtin_registry_stdlib_only() -> None:
         "diff.by_id", "diff.full_replace", "assess.passthrough", "store.in_memory",
     }
     assert required <= set(reg.keys())
+
+
+def test_examples_are_shipped_inside_package() -> None:
+    import datasource_kit
+
+    package_root = Path(datasource_kit.__file__).resolve().parent
+    assert EXAMPLE_ROOT.is_relative_to(package_root)
+    assert (EXAMPLE_ROOT / "demo-scraper" / "source.json").is_file()
+    assert (EXAMPLE_ROOT / "demo-batch" / "source.json").is_file()
