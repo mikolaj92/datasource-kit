@@ -319,7 +319,7 @@ class DesiredStateReconciler:
                 state["operator_verification_required"] = True
                 if not want_running:
                     try:
-                        outcome = stop(self.unit_dir(unit))
+                        outcome = self._stop(self.unit_dir(unit))
                         if outcome.signalled:
                             state["stop_requested"] = True
                     except ProcessTombstoneError:

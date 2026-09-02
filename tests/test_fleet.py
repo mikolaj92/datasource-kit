@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from datasource_kit import fleet
 from datasource_kit.fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
@@ -22,7 +23,6 @@ from datasource_kit.fleet import (
     Liveness,
     ProcessSpec,
     ProcessTombstoneError,
-    clear_process_tombstone,
     ReconcileOutcome,
     SpawnResult,
     StopOutcome,
@@ -31,6 +31,7 @@ from datasource_kit.fleet import (
     UnitObservation,
     WorkerControlPlane,
     acquire_lock,
+    clear_process_tombstone,
     honor_desired_state,
     liveness,
     lock_is_live,
@@ -1051,3 +1052,70 @@ def test_short_lived_spawn_retires_capability_but_keeps_tombstone(tmp_path: Path
     assert result.alive is False
     assert result.token not in fleet._OWNED_HANDLES
     assert (tmp_path / "pid.json").exists()
+
+
+def test_facade_spawn_honors_facade_spawn_process(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[tuple[str, ...], int | None]] = []
+
+    def fake_spawn_process(command, **kwargs):
+        calls.append((tuple(command), kwargs.get("_generation")))
+        persist = kwargs.get("_persist")
+        if persist is not None:
+            persist(4321, 10.0, "token")
+        return fleet.SpawnResult(4321, 10.0, True, "token", kwargs.get("_generation"))
+
+    monkeypatch.setattr(fleet, "spawn_process", fake_spawn_process)
+    spec = fleet.ProcessSpec(unit="unit", command=("worker",))
+    result = fleet.spawn(spec, unit_dir=tmp_path / "unit", generation=7)
+
+    assert result.pid == 4321
+    assert calls == [(('worker',), 7)]
+
+
+def test_facade_liveness_honors_facade_pid_probe(monkeypatch, tmp_path: Path) -> None:
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    (unit_dir / "pid.json").write_text('{"pid": 4321}', encoding="utf-8")
+    monkeypatch.setattr(fleet, "_pid_alive", lambda pid: pid == 4321)
+
+    assert fleet.liveness(unit_dir) == fleet.Liveness(pid=4321, state="running")
+
+
+def test_facade_reconciler_uses_facade_default_spawn(monkeypatch, tmp_path: Path) -> None:
+    seen: list[int] = []
+
+    def fake_spawn(spec, *, unit_dir, generation):
+        seen.append(generation)
+        return fleet.SpawnResult(pid=99, started_at=10.0, alive=True)
+
+    monkeypatch.setattr(fleet, "spawn", fake_spawn)
+    reconciler = fleet.DesiredStateReconciler(tmp_path)
+    reconciler.enable("unit")
+    outcome = reconciler.reconcile_unit(
+        fleet.ProcessSpec("unit", ("worker",)), fleet.honor_desired_state
+    )
+
+    assert outcome.pid == 99
+    assert seen == [1]
+
+
+
+def test_facade_reconciler_uses_facade_default_stop(monkeypatch, tmp_path: Path) -> None:
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    (unit_dir / "pid.json").write_text('{"pid": 4321}', encoding="utf-8")
+    monkeypatch.setattr(fleet, "liveness", lambda _unit_dir: fleet.Liveness(4321, "running"))
+    seen: list[Path] = []
+
+    def fake_stop(path: Path) -> fleet.StopResult:
+        seen.append(path)
+        return fleet.StopResult(pid=4321, signalled=True, killed=False, cleaned=False)
+
+    monkeypatch.setattr(fleet, "stop", fake_stop)
+    reconciler = fleet.DesiredStateReconciler(tmp_path)
+    reconciler.disable("unit")
+    reconciler.reconcile_unit(
+        fleet.ProcessSpec("unit", ("worker",)), fleet.honor_desired_state
+    )
+
+    assert seen == [unit_dir]

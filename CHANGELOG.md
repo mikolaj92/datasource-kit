@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.5 — 2026-09-02
+
+- Preserve public fleet facade injection and monkeypatch seams after the internal module split.
+
+
 ## v0.14.4 — 2026-09-02
 
 - Align fleet documentation with cooperative, tombstone-preserving stop semantics.
