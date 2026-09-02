@@ -399,8 +399,13 @@ def spawn_process(
     return SpawnResult(proc.pid, started_at, True, token, _generation)
 
 
-def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None,
-          generation: int | None = None) -> SpawnResult:
+def spawn(
+    spec: ProcessSpec,
+    *,
+    unit_dir: str | Path | None = None,
+    generation: int | None = None,
+    _spawn_process: Callable[..., SpawnResult] = spawn_process,
+) -> SpawnResult:
     """First-launch-only spawn with durable, ACK-gated process provenance."""
     resolved = _ensure_unit_dir(unit_dir if unit_dir is not None else spec.unit)
     pid_path = _pid_path(resolved)
@@ -449,7 +454,7 @@ def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None,
                            generation=generation, token=token,
                            incarnation=token, status="running_or_unknown")
             _write_pid(resolved, payload)
-        return spawn_process(spec.command, cwd=spec.cwd, env=child_env,
+        return _spawn_process(spec.command, cwd=spec.cwd, env=child_env,
             stdout=out, stderr=err, probe_window=spec.probe_window,
             probe_sleep=spec.probe_sleep, _persist=persist,
             _generation=generation, _token=token)
@@ -1045,7 +1050,11 @@ def clear_process_tombstone(
         return audit
 
 
-def liveness(unit_dir: str | Path) -> Liveness:
+def liveness(
+    unit_dir: str | Path,
+    *,
+    _pid_probe: Callable[[int], bool] = _pid_alive,
+) -> Liveness:
     """Check the liveness of a supervised process by *unit_dir*.
 
     Returns ``"running"``, ``"stopped"``, or ``"stale"``.
@@ -1067,7 +1076,7 @@ def liveness(unit_dir: str | Path) -> Liveness:
         # per the contract above.  There is no usable pid, so report 0 -- the
         # stale branch is never signalled, so the sentinel is never used.
         return Liveness(pid=0, state="stale")
-    if _pid_alive(pid):
+    if _pid_probe(pid):
         return Liveness(pid=pid, state="running")
 
     # Stale: pid.json exists but process is gone.  The consumer
