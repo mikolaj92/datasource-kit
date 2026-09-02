@@ -30,6 +30,9 @@ _OWNED_HANDLES = _process._OWNED_HANDLES
 _pid_alive = _process._pid_alive
 _clear_legacy_process_tombstone_locked = _process._clear_legacy_process_tombstone_locked
 
+# Process/state internals resolve the facade exports above at call time.  This
+# keeps these aliases as authoritative injection seams after the module split.
+
 # Compatibility wrapper keeps the former module-level monkeypatch seam useful.
 def clear_legacy_process_tombstone(*args, **kwargs):
     with _process._LEGACY_CLEARANCE_THREAD_LOCK:

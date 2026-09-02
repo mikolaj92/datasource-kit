@@ -17,12 +17,9 @@ from .process import (
     ProcessTombstoneError,
     SpawnResult,
     StopResult,
-    _pid_alive,
     _pid_path,
     _validate_unit,
     read_json,
-    spawn,
-    stop,
     write_json_atomic,
 )
 
@@ -84,6 +81,10 @@ def lock_is_live(owner: Mapping[str, Any] | None) -> bool:
     if owner.get("hostname") != socket.gethostname():
         # Different host: we cannot verify liveness -> fail closed (held).
         return True
+    # Resolve through the public facade so its stable diagnostic injection seam
+    # remains effective after state handling moved into this submodule.
+    from . import _pid_alive
+
     return _pid_alive(pid)
 
 def acquire_lock(
@@ -164,11 +165,15 @@ def honor_desired_state(state: Mapping[str, Any]) -> bool:
 def _default_spawn_action(
     spec: ProcessSpec, generation: int, unit_dir: Path
 ) -> SpawnResult:
-    """Spawn via :func:`spawn`, injecting the generation into the child env."""
+    """Spawn through the public facade, injecting the child generation."""
+    from . import spawn
+
     return spawn(spec, unit_dir=unit_dir, generation=generation)
 
 def _default_stop_action(unit_dir: Path) -> StopResult:
-    """Stop via :func:`stop`."""
+    """Stop through the public facade."""
+    from . import stop
+
     return stop(unit_dir)
 
 class DesiredStateReconciler:
@@ -319,7 +324,7 @@ class DesiredStateReconciler:
                 state["operator_verification_required"] = True
                 if not want_running:
                     try:
-                        outcome = stop(self.unit_dir(unit))
+                        outcome = self._stop(self.unit_dir(unit))
                         if outcome.signalled:
                             state["stop_requested"] = True
                     except ProcessTombstoneError:

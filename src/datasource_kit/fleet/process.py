@@ -449,7 +449,11 @@ def spawn(spec: ProcessSpec, *, unit_dir: str | Path | None = None,
                            generation=generation, token=token,
                            incarnation=token, status="running_or_unknown")
             _write_pid(resolved, payload)
-        return spawn_process(spec.command, cwd=spec.cwd, env=child_env,
+        # Resolve through the public facade so its documented monkeypatch seam
+        # remains authoritative after this implementation moved to a submodule.
+        from . import spawn_process as facade_spawn_process
+
+        return facade_spawn_process(spec.command, cwd=spec.cwd, env=child_env,
             stdout=out, stderr=err, probe_window=spec.probe_window,
             probe_sleep=spec.probe_sleep, _persist=persist,
             _generation=generation, _token=token)
@@ -1067,7 +1071,11 @@ def liveness(unit_dir: str | Path) -> Liveness:
         # per the contract above.  There is no usable pid, so report 0 -- the
         # stale branch is never signalled, so the sentinel is never used.
         return Liveness(pid=0, state="stale")
-    if _pid_alive(pid):
+    # Resolve through the public facade for compatibility with consumers that
+    # inject the diagnostic probe there.
+    from . import _pid_alive as facade_pid_alive
+
+    if facade_pid_alive(pid):
         return Liveness(pid=pid, state="running")
 
     # Stale: pid.json exists but process is gone.  The consumer

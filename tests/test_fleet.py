@@ -419,6 +419,86 @@ def test_read_json_missing_and_corrupt(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Public facade injection seams
+# ---------------------------------------------------------------------------
+
+
+def test_facade_spawn_uses_facade_spawn_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patching only the public facade controls spawn's process launch."""
+    from datasource_kit import fleet
+
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_spawn_process(command: tuple[str, ...], **kwargs: object) -> SpawnResult:
+        calls.append((command, kwargs))
+        persist = kwargs["_persist"]
+        assert callable(persist)
+        persist(4321, 1.0, str(kwargs["_token"]))
+        return SpawnResult(4321, 1.0, True, str(kwargs["_token"]), 7)
+
+    monkeypatch.setattr(fleet, "spawn_process", fake_spawn_process)
+    result = fleet.spawn(
+        ProcessSpec(unit="facade", command=(PYTHON, "worker.py")),
+        unit_dir=tmp_path,
+        generation=7,
+    )
+
+    assert result.pid == 4321
+    assert calls[0][0] == (PYTHON, "worker.py")
+    assert json.loads((tmp_path / "pid.json").read_text())["pid"] == 4321
+
+
+def test_facade_liveness_uses_facade_pid_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patching only the facade's diagnostic probe controls liveness."""
+    from datasource_kit import fleet
+
+    _write_payload(tmp_path / "pid.json", {"pid": 4321})
+    monkeypatch.setattr(fleet, "_pid_alive", lambda pid: pid == 4321)
+
+    assert fleet.liveness(tmp_path) == Liveness(pid=4321, state="running")
+    assert fleet.lock_is_live(
+        {"pid": 4321, "hostname": socket.gethostname()}
+    ) is True
+
+
+def test_reconciler_defaults_use_facade_spawn_and_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Facade-only patches control both reconciler default process actions."""
+    from datasource_kit import fleet
+
+    spawn_calls: list[tuple[str, int, Path]] = []
+    stop_calls: list[Path] = []
+
+    def fake_spawn(spec: ProcessSpec, *, unit_dir: Path, generation: int) -> SpawnResult:
+        spawn_calls.append((spec.unit, generation, unit_dir))
+        return SpawnResult(1234, 1.0, True)
+
+    def fake_stop(unit_dir: Path) -> StopResult:
+        stop_calls.append(unit_dir)
+        return StopResult(1234, True, False, False)
+
+    monkeypatch.setattr(fleet, "spawn", fake_spawn)
+    monkeypatch.setattr(fleet, "stop", fake_stop)
+    rec = DesiredStateReconciler(tmp_path)
+    spec = ProcessSpec(unit="facade", command=(PYTHON, "worker.py"))
+
+    rec.enable("facade")
+    assert rec.reconcile_unit(spec, honor_desired_state).action == "spawned"
+    assert spawn_calls == [("facade", 1, tmp_path / "facade")]
+
+    # A tombstone makes the disabled path request a stop through the default.
+    _write_payload(tmp_path / "facade" / "pid.json", {"pid": 1234})
+    rec.disable("facade")
+    assert rec.reconcile_unit(spec, honor_desired_state).action == "noop"
+    assert stop_calls == [tmp_path / "facade"]
+
+
+# ---------------------------------------------------------------------------
 # DesiredStateReconciler: state + policy
 # ---------------------------------------------------------------------------
 
