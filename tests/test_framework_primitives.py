@@ -74,10 +74,15 @@ def test_token_bucket_acquire_and_retry(monkeypatch: pytest.MonkeyPatch) -> None
         slept.append(seconds)
         now["value"] += seconds
 
-    import datasource_kit.ratelimit as ratelimit
+    import importlib
+
+    from datasource_kit import ratelimit
+
+    retry_module = importlib.import_module("datasource_kit.retry")
 
     monkeypatch.setattr(ratelimit.time, "monotonic", monotonic)
     monkeypatch.setattr(ratelimit.time, "sleep", sleep)
+    monkeypatch.setattr(retry_module.time, "sleep", sleep)
 
     bucket = dk.TokenBucket(rate=2.0, capacity=1.0)
     assert bucket.acquire() == 0.0
@@ -91,11 +96,12 @@ def test_token_bucket_acquire_and_retry(monkeypatch: pytest.MonkeyPatch) -> None
             raise ValueError("not yet")
         return "ok"
 
-    assert ratelimit.with_retry(
+    assert dk.retry(
         flaky,
-        attempts=3,
-        base_delay=0.1,
-        max_delay=0.2,
+        retries=3,
+        backoff_seconds=0.1,
+        backoff="exponential",
+        max_backoff_seconds=0.2,
         retry_on=(ValueError,),
     ) == "ok"
     assert calls["count"] == 3

@@ -23,8 +23,8 @@ from .runtime import run_ingest
 
 __all__ = ["main"]
 
-# Shipped demo profiles live at repo root / examples / sources / <name>
-EXAMPLE_ROOT = Path(__file__).resolve().parents[2] / "examples" / "sources"
+# Shipped demo profiles are package data, so this works from wheels and sdists.
+EXAMPLE_ROOT = Path(__file__).resolve().parent / "examples" / "sources"
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
