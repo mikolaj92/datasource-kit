@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.6 — 2026-09-06
+
+- Give ACK-gated wrapper startup its own positive, finite `startup_timeout`
+  (default 30 seconds), separate from the short post-ACK crash probe (#78).
+- Keep timed-out launch intent fenced and never acknowledge an unready wrapper.
+
 ## v0.14.5 — 2026-09-02
 
 - Preserve public fleet facade injection and monkeypatch seams after the internal module split.
