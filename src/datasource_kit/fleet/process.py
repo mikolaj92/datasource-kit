@@ -18,6 +18,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -70,6 +71,12 @@ class ProcessTombstoneError(RuntimeError):
 GENERATION_ENV = "DATASOURCE_KIT_GENERATION"
 _PROBE_SLEEP = 0.25
 _PROBE_WINDOW = 1.5
+_STARTUP_TIMEOUT = 30.0
+
+
+def _validate_startup_timeout(value: float) -> None:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("startup_timeout must be positive and finite")
 
 StreamOpener = Callable[[Path], IO[Any]]
 
@@ -82,6 +89,11 @@ class ProcessSpec:
     parent); ``env_overlay`` is then applied without ever being written to pid
     metadata.  When :func:`spawn` receives a generation, it is injected last
     under ``generation_env`` (set it to ``None`` to disable injection).
+
+    ``startup_timeout`` bounds wrapper readiness and ACK transport (30 seconds
+    by default), independently from ``probe_window`` after exec. It must be
+    positive and finite. Timeout retains durable launch intent; operators still
+    must verify the whole workload before clearing it.
 
     ``stdout_path`` and ``stderr_path`` are consumer-owned paths opened in
     append mode.  The kit chooses neither their layout nor names.  ``opener``
@@ -107,9 +119,11 @@ class ProcessSpec:
     env_overlay: Mapping[str, str] = field(default_factory=dict)
     generation_env: str | None = GENERATION_ENV
     pid_metadata: Mapping[str, object] = field(default_factory=dict)
+    startup_timeout: float = _STARTUP_TIMEOUT
 
     def __post_init__(self) -> None:
         _validate_unit(self.unit)
+        _validate_startup_timeout(self.startup_timeout)
 
 
 @dataclass(slots=True, frozen=True)
@@ -350,6 +364,7 @@ def spawn_process(
     env: Mapping[str, str] | None = None, stdout: int | IO[str] | None = None,
     stderr: int | IO[str] | None = None, probe_window: float = _PROBE_WINDOW,
     probe_sleep: float = _PROBE_SLEEP,
+    startup_timeout: float = _STARTUP_TIMEOUT,
     _persist: Callable[[int, float, str], None] | None = None,
     _generation: int | None = None, _token: str | None = None,
 ) -> SpawnResult:
@@ -358,6 +373,7 @@ def spawn_process(
     The private ``_persist`` hook is intentionally only used by :func:`spawn`.
     Without it this remains a compatibility primitive and ACKs immediately.
     """
+    _validate_startup_timeout(startup_timeout)
     child_env = dict(os.environ) if env is None else dict(env)
     token = _token or uuid.uuid4().hex
     parent_fd, child_fd = socket.socketpair()
@@ -373,7 +389,7 @@ def spawn_process(
     child_fd.close()
     started_at = time.time()
     try:
-        parent_fd.settimeout(max(probe_window, 1.0))
+        parent_fd.settimeout(startup_timeout)
         if parent_fd.recv(6) != b"READY\n":
             return SpawnResult(proc.pid, started_at, False)
         if _persist is not None:
@@ -456,7 +472,8 @@ def spawn(
             _write_pid(resolved, payload)
         return _spawn_process(spec.command, cwd=spec.cwd, env=child_env,
             stdout=out, stderr=err, probe_window=spec.probe_window,
-            probe_sleep=spec.probe_sleep, _persist=persist,
+            probe_sleep=spec.probe_sleep, startup_timeout=spec.startup_timeout,
+            _persist=persist,
             _generation=generation, _token=token)
 
 
