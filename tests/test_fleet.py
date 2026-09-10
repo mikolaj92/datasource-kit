@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import signal
@@ -273,6 +274,38 @@ def test_liveness_non_integer_pid_is_stale(tmp_path: Path) -> None:
 
     result = liveness(unit_dir)
     assert result.state == "stale"
+
+
+def test_liveness_contract_matches_readme_and_docstring(tmp_path: Path) -> None:
+    """Public liveness docs match running/stale + FileNotFoundError, never stopped."""
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert '`liveness(unit_dir) -> Liveness` -- returns `"running"` or `"stale"`' in text
+    assert "Missing pid.json raises `FileNotFoundError`." in text
+    assert 'This primitive never returns `"stopped"`.' in text
+    assert 'returns `"running"`, `"stopped"`, or' not in text
+
+    doc = inspect.getdoc(liveness) or ""
+    assert 'Returns ``"running"``' in (liveness.__doc__ or "")
+    assert '``"stale"``' in (liveness.__doc__ or "")
+    assert "FileNotFoundError" in doc
+    assert 'never returns ``"stopped"``' in doc
+    assert 'Returns ``"running"``, ``"stopped"``, or ``"stale"``.' not in doc
+
+    comment = inspect.getsource(Liveness)
+    assert '# "running" or "stale"; never "stopped"' in comment
+    assert '# "running", "stopped", or "stale"' not in comment
+
+    missing = tmp_path / "no-pid"
+    missing.mkdir()
+    with pytest.raises(FileNotFoundError):
+        liveness(missing)
+
+    dead = tmp_path / "dead-pid"
+    _write_payload(dead / "pid.json", {"pid": 999_999_999, "command": [], "started_at": 0})
+    result = liveness(dead)
+    assert result.state == "stale"
+    assert result.state != "stopped"
 
 
 

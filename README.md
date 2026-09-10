@@ -93,9 +93,10 @@ primitives for long-lived worker OS processes:
   SIGKILL and never clears the process tombstone.
 - `stop_process(pid)` -- rejected numeric-PID primitive; always raises
   `ProcessTombstoneError` because a PID cannot prove process identity.
-- `liveness(unit_dir) -> Liveness` -- reports the tombstone-aware observation;
-  a persisted `pid.json` is not treated as proof that a matching process is safe
-  to signal.
+- `liveness(unit_dir) -> Liveness` -- returns `"running"` or `"stale"` from
+  pid.json and OS-level checks. Missing pid.json raises `FileNotFoundError`.
+  A persisted `pid.json` is not treated as proof that a matching process is
+  safe to signal. This primitive never returns `"stopped"`.
 
 POSIX only. No scheduler, no cron, no daemon -- these are primitives; policy
 stays in the consuming project.

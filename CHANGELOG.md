@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Document `liveness()` as `"running"` / `"stale"` plus `FileNotFoundError`
+  when pid.json is missing; it never returns `"stopped"` (#83).
+
 ## v0.14.6 — 2026-09-06
 
 - Give ACK-gated wrapper startup its own positive, finite `startup_timeout`
