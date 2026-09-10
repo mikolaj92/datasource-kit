@@ -347,6 +347,49 @@ def test_pid_alive_nonpositive_pid_is_dead() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_stop_contract_matches_readme_and_docstring(tmp_path: Path) -> None:
+    """Public stop docs and signatures match the fail-closed live-handle policy."""
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert "`stop(unit_dir) -> StopResult`" in text
+    assert "never sends\n  SIGKILL, never signals a numeric PID, and never clears the process tombstone." in text
+    assert "`StopResult.killed` and `cleaned` stay `False`." in text
+    assert "`stop_process(pid)` -- rejected numeric-PID primitive" in text
+    assert "no numeric-PID signalling, escalation, adoption, guardian cleanup, or restart is" in text
+    assert "`stop(unit_dir, timeout)`" not in text
+    assert "escalates to SIGKILL" not in text
+    assert "cleans up stale pid files" not in text
+
+    assert list(inspect.signature(stop).parameters) == ["unit_dir"]
+    assert list(inspect.signature(stop_process).parameters) == ["pid"]
+    assert "There is no\nescalation to SIGKILL" in (stop.__doc__ or "")
+    assert "tombstone is not cleared" in (stop.__doc__ or "")
+    assert "Refuse numeric-PID signalling" in (stop_process.__doc__ or "")
+    with pytest.raises(ProcessTombstoneError, match="numeric PID signalling is disabled"):
+        stop_process(1)
+
+    spec = ProcessSpec(
+        unit="stop-docs",
+        command=(PYTHON, "-c", "import time; time.sleep(30)"),
+        probe_window=0.2,
+        probe_sleep=0.02,
+    )
+    unit_dir = tmp_path / "stop-docs"
+    spawned = spawn(spec, unit_dir=unit_dir)
+    try:
+        result = stop(unit_dir)
+        assert result.signalled is True
+        assert result.killed is False
+        assert result.cleaned is False
+        tombstone = json.loads((unit_dir / "pid.json").read_text(encoding="utf-8"))
+        assert tombstone["pid"] == spawned.pid
+        assert tombstone["token"] == spawned.token
+        assert tombstone["stop_requested"] is True
+        assert tombstone["operator_verification_required"] is True
+    finally:
+        os.kill(spawned.pid, signal.SIGKILL)
+
+
 
 
 

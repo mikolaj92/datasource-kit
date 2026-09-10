@@ -10,7 +10,7 @@ Boundaries
   fleet membership, admission, reconciliation, and policy stay in the consumer.
 - No knowledge of what the worker does -- the kit never sees
   consumer vocabulary, storage, or business state.
-- POSIX only (uses ``os.kill``, ``signal``, ``start_new_session``).
+- POSIX only (uses ``os.kill``, ``start_new_session``).
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import hashlib
 import json
 import math
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -139,7 +138,11 @@ class SpawnResult:
 
 @dataclass(slots=True, frozen=True)
 class StopResult:
-    """Outcome of a :func:`stop` call."""
+    """Outcome of a :func:`stop` call.
+
+    ``killed`` and ``cleaned`` stay ``False``: there is no SIGKILL
+    escalation and the pid.json tombstone is retained.
+    """
 
     pid: int
     signalled: bool
@@ -213,9 +216,6 @@ def read_json(path: str | Path) -> dict[str, Any] | None:
 
 
 _PID_FILE = "pid.json"
-_STOP_SIGNAL = signal.SIGTERM
-_KILL_SIGNAL = signal.SIGKILL
-_DEFAULT_TIMEOUT = 5.0
 _OWNED_HANDLES: dict[str, subprocess.Popen[Any]] = {}
 # POSIX record locks do not serialize threads reliably (and macOS flock locks
 # are process-associated), so protect descriptor ownership within this process.
@@ -477,17 +477,19 @@ def spawn(
             _generation=generation, _token=token)
 
 
-def stop_process(pid: int, *, timeout: float = _DEFAULT_TIMEOUT) -> StopOutcome:
+def stop_process(pid: int) -> StopOutcome:
     """Refuse numeric-PID signalling; identity cannot be proven by a PID."""
     raise ProcessTombstoneError(
         "numeric PID signalling is disabled; operator verification required"
     )
 
 
-def stop(unit_dir: str | Path, *, timeout: float = _DEFAULT_TIMEOUT) -> StopResult:
+def stop(unit_dir: str | Path) -> StopResult:
     """Request cooperative TERM only through this supervisor's live handle.
 
-    Provenance is retained regardless of the outcome. There is no escalation.
+    Provenance is retained regardless of the outcome. There is no
+    escalation to SIGKILL, no numeric-PID signalling, and the pid.json
+    tombstone is not cleared.
     """
     path = _pid_path(unit_dir)
     data = read_json(path)
@@ -1094,6 +1096,6 @@ def liveness(
     if _pid_probe(pid):
         return Liveness(pid=pid, state="running")
 
-    # Stale: pid.json exists but process is gone.  The consumer
-    # is expected to call ``stop()`` to clean up stale metadata.
+    # Stale: pid.json exists but the process is gone. That file remains a
+    # tombstone; :func:`stop` will not remove it.
     return Liveness(pid=pid, state="stale")

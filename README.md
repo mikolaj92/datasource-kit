@@ -88,9 +88,10 @@ primitives for long-lived worker OS processes:
   generation injection, and opaque JSON pid metadata.
 - `spawn(spec) -> SpawnResult` -- starts a subprocess with `start_new_session`,
   writes pid.json atomically, and performs a fail-closed immediate-exit probe.
-- `stop(unit_dir, timeout) -> StopResult` -- requests cooperative termination
-  only through the live `Popen` handle owned by this supervisor. It never sends
-  SIGKILL and never clears the process tombstone.
+- `stop(unit_dir) -> StopResult` -- requests cooperative termination only
+  through the live `Popen` handle owned by this supervisor. It never sends
+  SIGKILL, never signals a numeric PID, and never clears the process tombstone.
+  `StopResult.killed` and `cleaned` stay `False`.
 - `stop_process(pid)` -- rejected numeric-PID primitive; always raises
   `ProcessTombstoneError` because a PID cannot prove process identity.
 - `liveness(unit_dir) -> Liveness` -- returns `"running"` or `"stale"` from

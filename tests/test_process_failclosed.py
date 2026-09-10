@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from datasource_kit.fleet import (
     ProcessTombstoneError,
     clear_process_tombstone,
     spawn,
+    stop,
     stop_process,
 )
 
@@ -48,5 +51,31 @@ def test_exact_asserted_clearance_audits_and_enables_replacement(tmp_path: Path)
 
 
 def test_numeric_pid_signalling_is_disabled() -> None:
-    with pytest.raises(ProcessTombstoneError):
+    with pytest.raises(ProcessTombstoneError, match="numeric PID signalling is disabled"):
         stop_process(1)
+
+
+def test_cooperative_stop_keeps_tombstone_without_kill_or_cleanup(tmp_path: Path) -> None:
+    first = spawn(
+        ProcessSpec(
+            unit="u",
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            probe_window=.2,
+            probe_sleep=.02,
+        ),
+        unit_dir=tmp_path,
+        generation=1,
+    )
+    try:
+        result = stop(tmp_path)
+        assert result.pid == first.pid
+        assert result.signalled is True
+        assert result.killed is False
+        assert result.cleaned is False
+        tombstone = json.loads((tmp_path / "pid.json").read_text())
+        assert tombstone["token"] == first.token
+        assert tombstone["status"] == "stop_requested_or_unknown"
+        with pytest.raises(ProcessTombstoneError):
+            spawn(spec(), unit_dir=tmp_path, generation=2)
+    finally:
+        os.kill(first.pid, signal.SIGKILL)
