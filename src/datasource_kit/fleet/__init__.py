@@ -75,7 +75,15 @@ def spawn(
 
 
 def liveness(unit_dir: str | Path) -> Liveness:
-    """Probe while honoring the stable facade-level PID seam."""
+    """Check the liveness of a supervised process by *unit_dir*.
+
+    Returns ``"running"`` when *pid.json* names a live pid, or ``"stale"``
+    when the file exists but the pid is missing, non-integer, or not alive.
+    Raises :class:`FileNotFoundError` when *pid.json* is absent.  This
+    primitive never returns ``"stopped"``; that label belongs to desired-state
+    observation / the control plane, not to :func:`liveness`.  The probe
+    honors the stable facade-level PID seam.
+    """
     return _process.liveness(unit_dir, _pid_probe=_pid_alive)
 
 

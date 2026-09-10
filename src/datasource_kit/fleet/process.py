@@ -166,7 +166,7 @@ class Liveness:
     """Process liveness state from :func:`liveness`."""
 
     pid: int
-    state: str  # "running", "stopped", or "stale"
+    state: str  # "running" or "stale"; never "stopped"
 
 
 # ---------------------------------------------------------------------------
@@ -1074,13 +1074,11 @@ def liveness(
 ) -> Liveness:
     """Check the liveness of a supervised process by *unit_dir*.
 
-    Returns ``"running"``, ``"stopped"``, or ``"stale"``.
-    ``"stale"`` means *pid.json* exists but the referenced pid is not alive,
-    or the file is corrupt (a valid JSON object whose ``pid`` is missing or
-    non-integer) -- either way the consumer should clean it up.  Raises
-    :class:`FileNotFoundError` only when *pid.json* is absent, so an
-    out-of-process observer can classify any surviving pid file without
-    crashing on a torn or hand-edited one.
+    Returns ``"running"`` when *pid.json* names a live pid, or ``"stale"``
+    when the file exists but the pid is missing, non-integer, or not alive.
+    Raises :class:`FileNotFoundError` when *pid.json* is absent.  This
+    primitive never returns ``"stopped"``; that label belongs to desired-state
+    observation / the control plane, not to :func:`liveness`.
     """
     data = _read_pid(unit_dir)
     if data is None:
