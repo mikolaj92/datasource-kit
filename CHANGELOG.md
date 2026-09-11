@@ -4,6 +4,8 @@
 
 - Document `liveness()` as `"running"` / `"stale"` plus `FileNotFoundError`
   when pid.json is missing; it never returns `"stopped"` (#83).
+- Document and contract `stop` / `stop_process` as live-handle TERM only: no
+  timeout, no SIGKILL escalation, and no pid.json cleanup (#82).
 
 ## v0.14.6 — 2026-09-06
 
