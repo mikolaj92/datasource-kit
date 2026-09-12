@@ -65,7 +65,13 @@ def spawn(
     unit_dir: str | Path | None = None,
     generation: int | None = None,
 ) -> SpawnResult:
-    """Spawn while honoring a facade-level ``spawn_process`` injection."""
+    """First-launch-only spawn with durable, ACK-gated process provenance.
+
+    Writes ``pid.json`` with ``status="launch_intent"`` before ``Popen``.
+    Presence of the file is a tombstone: immediate exit does not remove it,
+    and a restarted supervisor cannot launch again without operator clearance.
+    Honors a facade-level ``spawn_process`` injection.
+    """
     return _process.spawn(
         spec,
         unit_dir=unit_dir,

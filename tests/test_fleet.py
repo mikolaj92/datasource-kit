@@ -63,6 +63,27 @@ def _write_payload(path: Path, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_spawn_contract_matches_readme_and_docstring() -> None:
+    """Public spawn docs match fence-before-exec, not post-probe pid.json."""
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert '`spawn(spec) -> SpawnResult` -- first-launch-only: writes `pid.json` with' in text
+    assert '`status="launch_intent"` before `Popen`' in text
+    assert "Immediate exit\n  leaves the tombstone; presence of the file blocks automatic relaunch." in text
+    assert "`pid.json` is established as a durable\n`launch_intent` fence before `Popen`" in text
+    assert "surviving the probe window does not create\nthe file, and immediate exit does not remove it." in text
+    assert "Presence of the file is a\ntombstone that prevents automatic replacement." in text
+    assert "Immediate exit does not remove the file." in text
+    assert "Any surviving metadata is a\ntombstone, regardless of PID liveness or readability, and prevents automatic replacement." in text
+    assert "after the child survives its probe window, and immediate exit leaves none" not in text
+    assert "writes pid.json atomically, and performs a fail-closed immediate-exit probe." not in text
+
+    doc = inspect.getdoc(spawn) or ""
+    assert 'status="launch_intent"' in doc
+    assert "before ``Popen``" in doc
+    assert "immediate exit does not remove it" in doc
+    assert "cannot launch again" in doc
+    assert "after the child survives its probe window" not in doc
 
 
 def test_spawn_long_running(tmp_path: Path) -> None:

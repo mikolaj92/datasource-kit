@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Document `spawn()` as fence-before-exec: `pid.json` is written with
+  `status="launch_intent"` before `Popen`, and immediate exit leaves the
+  tombstone rather than an empty unit directory (#84).
 - Document `liveness()` as `"running"` / `"stale"` plus `FileNotFoundError`
   when pid.json is missing; it never returns `"stopped"` (#83).
 - Document and contract `stop` / `stop_process` as live-handle TERM only: no
