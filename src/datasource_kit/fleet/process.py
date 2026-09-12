@@ -422,7 +422,12 @@ def spawn(
     generation: int | None = None,
     _spawn_process: Callable[..., SpawnResult] = spawn_process,
 ) -> SpawnResult:
-    """First-launch-only spawn with durable, ACK-gated process provenance."""
+    """First-launch-only spawn with durable, ACK-gated process provenance.
+
+    Writes ``pid.json`` with ``status="launch_intent"`` before ``Popen``.
+    Presence of the file is a tombstone: immediate exit does not remove it,
+    and a restarted supervisor cannot launch again without operator clearance.
+    """
     resolved = _ensure_unit_dir(unit_dir if unit_dir is not None else spec.unit)
     pid_path = _pid_path(resolved)
     # Presence is the fence: never parse, probe, clean, adopt, or infer safety.

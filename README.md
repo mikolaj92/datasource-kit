@@ -86,8 +86,10 @@ primitives for long-lived worker OS processes:
   including optional consumer-owned append paths for stdout/stderr (or an
   injected opener), immediate-exit probe timing, environment overlay and
   generation injection, and opaque JSON pid metadata.
-- `spawn(spec) -> SpawnResult` -- starts a subprocess with `start_new_session`,
-  writes pid.json atomically, and performs a fail-closed immediate-exit probe.
+- `spawn(spec) -> SpawnResult` -- first-launch-only: writes `pid.json` with
+  `status="launch_intent"` before `Popen`, then starts a subprocess with
+  `start_new_session` and a fail-closed immediate-exit probe. Immediate exit
+  leaves the tombstone; presence of the file blocks automatic relaunch.
 - `stop(unit_dir) -> StopResult` -- requests cooperative termination only
   through the live `Popen` handle owned by this supervisor. It never sends
   SIGKILL, never signals a numeric PID, and never clears the process tombstone.
@@ -144,10 +146,11 @@ spec = ProcessSpec(
 Paths and names remain consumer-owned. Environment values are used only for
 launch and are never serialized into `pid.json`; opaque pid metadata must be
 JSON-compatible and cannot replace the standard pid fields. Parent-side log
-descriptors are closed after spawning. A pid file is written atomically only
-after the child survives its probe window, and immediate exit leaves none. No
-health semantics beyond process liveness -- health interpretation stays in the
-consumer.
+descriptors are closed after spawning. `pid.json` is established as a durable
+`launch_intent` fence before `Popen`; surviving the probe window does not create
+the file, and immediate exit does not remove it. Presence of the file is a
+tombstone that prevents automatic replacement. No health semantics beyond
+process liveness -- health interpretation stays in the consumer.
 
 ### Generic fleet pass hosting
 
@@ -419,10 +422,12 @@ uv run pytest
 
 ### Fail-closed process lifecycle
 
-Fleet worker launch is deliberately first-launch-only. The session-leader exec gate waits
-for durable `pid.json` provenance (`unit`, `generation`, stable random `token`) before
-executing consumer code. Any surviving metadata is a tombstone, regardless of PID
-liveness or readability, and prevents automatic replacement. Disabling never removes it.
+Fleet worker launch is deliberately first-launch-only. `spawn` writes `pid.json` with
+`status="launch_intent"` before `Popen`. The session-leader exec gate waits for that
+durable provenance (`unit`, `generation`, stable random `token`) before executing
+consumer code. Immediate exit does not remove the file. Any surviving metadata is a
+tombstone, regardless of PID liveness or readability, and prevents automatic replacement.
+Disabling never removes it.
 The owning in-memory supervisor may request cooperative TERM through its live `Popen`
 handle; no numeric-PID signalling, escalation, adoption, guardian cleanup, or restart is
 performed. After externally proving the entire workload is gone, an operator may call
