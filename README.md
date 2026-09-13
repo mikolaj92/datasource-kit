@@ -421,6 +421,9 @@ uv lock --check
 uv run --group dev pytest
 ```
 
+FastAPI adapter tests use `httpx2.AsyncClient` with `ASGITransport` directly;
+they do not depend on Starlette `TestClient` or its deprecated `httpx` fallback.
+
 
 ### Fail-closed process lifecycle
 

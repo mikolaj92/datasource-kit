@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import json
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
+import httpx2
 import pytest
 
 from datasource_kit.fleet import DesiredStateReconciler, WorkerControlPlane
@@ -33,6 +35,17 @@ def _block_fastapi_imports(monkeypatch: pytest.MonkeyPatch) -> None:
         return real_import(name, globals_, locals_, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+
+def _request(app: Any, method: str, url: str) -> httpx2.Response:
+    async def send() -> httpx2.Response:
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            return await client.request(method, url)
+
+    return asyncio.run(send())
 
 
 def _control_plane(tmp_path: Path) -> WorkerControlPlane:
@@ -81,16 +94,14 @@ def test_build_router_requires_fastapi_extra_when_missing(
 def test_router_observe_and_control_roundtrip(tmp_path: Path) -> None:
     # Given: a router mounted over a real control plane for two units.
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
 
     from datasource_kit.adapters.fastapi import build_control_plane_router
 
     app = FastAPI()
     app.include_router(build_control_plane_router(_control_plane(tmp_path)))
-    client = TestClient(app)
 
     # When: the whole fleet is observed before any control action.
-    fleet = client.get("/workers")
+    fleet = _request(app, "GET", "/workers")
 
     # Then: both declared units report stopped/disabled with no process.
     assert fleet.status_code == 200
@@ -104,8 +115,8 @@ def test_router_observe_and_control_roundtrip(tmp_path: Path) -> None:
         assert row["heartbeat"] == {}
 
     # When: eli is warm-paused, then observed on its own.
-    paused = client.post("/workers/eli/pause")
-    observed = client.get("/workers/eli")
+    paused = _request(app, "POST", "/workers/eli/pause")
+    observed = _request(app, "GET", "/workers/eli")
 
     # Then: the keep-alive state flips to paused and the read-back agrees.
     assert paused.status_code == 200
@@ -117,30 +128,28 @@ def test_router_observe_and_control_roundtrip(tmp_path: Path) -> None:
     assert observed.json()["actual"] == "stopped"
 
     # When / Then: the remaining control verbs flip desired state as declared.
-    assert client.post("/workers/eli/resume").json()["desired"] == "enabled"
-    assert client.post("/workers/eli/disable").json()["desired"] == "disabled"
-    assert client.post("/workers/eli/enable").json()["desired"] == "enabled"
+    assert _request(app, "POST", "/workers/eli/resume").json()["desired"] == "enabled"
+    assert _request(app, "POST", "/workers/eli/disable").json()["desired"] == "disabled"
+    assert _request(app, "POST", "/workers/eli/enable").json()["desired"] == "enabled"
 
-    # And: saas (the other unit) is untouched by eli's transitions.
-    assert client.get("/workers/saos").json()["desired"] == "disabled"
+    # And: saos (the other unit) is untouched by eli's transitions.
+    assert _request(app, "GET", "/workers/saos").json()["desired"] == "disabled"
 
 
 def test_router_unknown_unit_fails_closed_with_404(tmp_path: Path) -> None:
     # Given: a router over a fleet that declares only eli and saos.
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
 
     from datasource_kit.adapters.fastapi import build_control_plane_router
 
     app = FastAPI()
     app.include_router(build_control_plane_router(_control_plane(tmp_path)))
-    client = TestClient(app)
 
     # When / Then: both reads and writes for an undeclared unit fail closed.
-    assert client.get("/workers/ghost").status_code == 404
-    assert client.post("/workers/ghost/pause").status_code == 404
-    assert client.post("/workers/ghost/resume").status_code == 404
-    assert client.post("/workers/ghost/disable").status_code == 404
+    assert _request(app, "GET", "/workers/ghost").status_code == 404
+    assert _request(app, "POST", "/workers/ghost/pause").status_code == 404
+    assert _request(app, "POST", "/workers/ghost/resume").status_code == 404
+    assert _request(app, "POST", "/workers/ghost/disable").status_code == 404
 
 
 def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
@@ -149,7 +158,6 @@ def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
     # Given: a DECLARED unit whose pid.json is valid JSON but lacks a usable
     # pid (torn/partial write, custom spawn action, or manual edit).
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
 
     from datasource_kit.adapters.fastapi import build_control_plane_router
 
@@ -161,11 +169,10 @@ def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
 
     app = FastAPI()
     app.include_router(build_control_plane_router(_control_plane(tmp_path)))
-    client = TestClient(app)
 
     # When: the corrupt declared unit is read both ways.
-    single = client.get("/workers/eli")
-    fleet = client.get("/workers")
+    single = _request(app, "GET", "/workers/eli")
+    fleet = _request(app, "GET", "/workers")
 
     # Then: corrupt runtime state on a declared unit is neither "unknown"
     # (no 404) nor a crash (no 500) -- it reads as a normal stopped

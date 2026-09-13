@@ -41,6 +41,20 @@ def test_uv_lock_contains_current_fastapi_and_httpx2() -> None:
     assert packages["httpx2"] == "2.12.0"
 
 
+def test_uv_lock_does_not_restore_legacy_httpx() -> None:
+    assert "httpx" not in _lock_packages()
+
+
+def test_fastapi_router_tests_do_not_use_testclient_fallback() -> None:
+    router_tests = (_ROOT / "tests/adapters/test_fastapi_router.py").read_text(
+        encoding="utf-8"
+    ).lower()
+
+    assert "testclient" not in router_tests
+    assert "httpx2.asyncclient" in router_tests
+    assert "httpx2.asgitransport" in router_tests
+
+
 def test_uv_lock_matches_the_manifest() -> None:
     completed = subprocess.run(
         ["uv", "lock", "--check"],
