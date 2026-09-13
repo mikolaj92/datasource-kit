@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pin the optional FastAPI extra and the `[dev]` extra/group to current
+  FastAPI and HTTPX2, and keep `uv.lock` in lockstep (`uv lock --check`).
 - Document `spawn()` as fence-before-exec: `pid.json` is written with
   `status="launch_intent"` before `Popen`, and immediate exit leaves the
   tombstone rather than an empty unit directory (#84).

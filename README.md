@@ -365,6 +365,7 @@ Core has no third-party runtime dependencies. Optional integrations are lazy:
 ```bash
 pip install "datasource-kit[profiles]"   # YAML profile loading
 pip install "datasource-kit[fala]"       # Fala execution + artifact adapters
+pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 ```
 
 The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
@@ -416,7 +417,8 @@ def update_database(*, db_path) -> dict:
 ## Development
 
 ```bash
-uv run pytest
+uv lock --check
+uv run --group dev pytest
 ```
 
 
