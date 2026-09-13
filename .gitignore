@@ -13,5 +13,4 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
-uv.lock
 .lokay/
