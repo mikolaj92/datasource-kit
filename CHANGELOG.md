@@ -2,8 +2,7 @@
 
 ## Unreleased
 
-- Keep FastAPI adapter tests on HTTPX2's `AsyncClient` + `ASGITransport`, with
-  no legacy Starlette `TestClient` / `httpx` fallback dependency.
+- Keep FastAPI adapter tests on HTTPX2's `AsyncClient` + `ASGITransport` only.
 - Pin the optional FastAPI extra and the `[dev]` extra/group to current
   FastAPI and HTTPX2, and keep `uv.lock` in lockstep (`uv lock --check`).
 - Document `spawn()` as fence-before-exec: `pid.json` is written with
