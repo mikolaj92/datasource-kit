@@ -421,6 +421,9 @@ uv lock --check
 uv run --group dev pytest
 ```
 
+FastAPI adapter tests drive the router with `httpx2.AsyncClient` and
+`ASGITransport` only.
+
 
 ### Fail-closed process lifecycle
 
