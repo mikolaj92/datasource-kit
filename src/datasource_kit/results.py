@@ -24,7 +24,11 @@ def _require_text(value: str, field: str) -> str:
 
 @dataclass(slots=True, frozen=True)
 class Cursor:
-    """Opaque cursor value named by the consumer."""
+    """Opaque cursor value named by the consumer.
+
+    ``kind`` is a consumer label (for example ``page``, ``offset``, or
+    ``timestamp``).  The kit does not interpret either field as identity.
+    """
 
     kind: str
     value: str
@@ -32,6 +36,21 @@ class Cursor:
     def __post_init__(self) -> None:
         _require_text(self.kind, "cursor kind")
         _require_text(self.value, "cursor value")
+
+    def as_dict(self) -> dict[str, str]:
+        """JSON-compatible checkpoint form used by file-backed stores."""
+
+        return {"kind": self.kind, "value": self.value}
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, object]) -> "Cursor":
+        """Rebuild a cursor from :meth:`as_dict` or an equivalent mapping."""
+
+        kind = raw.get("kind")
+        value = raw.get("value")
+        if not isinstance(kind, str) or not isinstance(value, str):
+            raise ValidationError("Cursor requires kind and value strings")
+        return cls(kind, value)
 
 
 @dataclass(slots=True, frozen=True)
