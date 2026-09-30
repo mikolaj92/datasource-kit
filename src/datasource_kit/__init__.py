@@ -12,8 +12,11 @@ It supports five faces:
   wraps one opaque synchronous callback without owning run or retry policy.
 * **Autonomous worker hosting** -- :class:`~datasource_kit.worker.WorkerHost`
   owns checkpoint, heartbeat, backoff, and shutdown mechanics around consumer
-  source intent; :class:`~datasource_kit.continuous.ContinuousWorkerHost` is a
-  sibling for repeating already-persisted opaque steps from post-step decisions.
+  source intent; :class:`~datasource_kit.fetch.FetchIntent` is a concrete
+  ``plan -> fetch -> persist`` intent for a consumer-supplied fetcher and
+  consumer-named cursor; :class:`~datasource_kit.continuous.ContinuousWorkerHost`
+  is a sibling for repeating already-persisted opaque steps from post-step
+  decisions.
 * **Fleet supervision** -- :mod:`~datasource_kit.fleet` domain-blind process
   supervision primitives (spawn, stop, liveness) for long-lived worker OS
   processes.
@@ -46,6 +49,14 @@ from .errors import (
     ValidationError,
 )
 from .execution import ExecutionBackend, ExecutionRequest, InlineExecutionBackend
+from .fetch import (
+    CursorPlanner,
+    FetchIntent,
+    FetchPlan,
+    ResumePlanner,
+    SequenceOrder,
+    SequencePlanner,
+)
 from .fleet import (
     DESIRED_DISABLED,
     DESIRED_ENABLED,
@@ -111,7 +122,7 @@ from .results import (
 )
 from .retry import retry, retry_decorator
 from .runtime import run_ingest
-from .window import DayWindow, WindowIterator, split_range_into_days
+from .window import DayWindow, WindowIterator, WindowOrder, split_range_into_days
 from .worker import (
     BackoffPolicy,
     CheckpointStore,
@@ -141,6 +152,7 @@ __all__ = [
     "CompletenessReport",
     "ContinuousWorkerHost",
     "Cursor",
+    "CursorPlanner",
     "DataSource",
     "DatasourceKitError",
     "DayWindow",
@@ -152,6 +164,8 @@ __all__ = [
     "ExecutionBackend",
     "ExecutionModel",
     "ExecutionRequest",
+    "FetchIntent",
+    "FetchPlan",
     "Fetcher",
     "FileCheckpointStore",
     "FleetHost",
@@ -183,7 +197,10 @@ __all__ = [
     "ReconcileOutcome",
     "Registry",
     "RegistryError",
+    "ResumePlanner",
     "RuntimeStepError",
+    "SequenceOrder",
+    "SequencePlanner",
     "SourceContract",
     "SourceError",
     "SourceIntent",
@@ -201,6 +218,7 @@ __all__ = [
     "UnitObservation",
     "ValidationError",
     "WindowIterator",
+    "WindowOrder",
     "WorkDirective",
     "WorkerControlPlane",
     "WorkerHeartbeat",

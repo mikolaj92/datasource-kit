@@ -383,9 +383,12 @@ def test_stop_contract_matches_readme_and_docstring(tmp_path: Path) -> None:
 
     assert list(inspect.signature(stop).parameters) == ["unit_dir"]
     assert list(inspect.signature(stop_process).parameters) == ["pid"]
-    assert "There is no\nescalation to SIGKILL" in (stop.__doc__ or "")
-    assert "tombstone is not cleared" in (stop.__doc__ or "")
-    assert "Refuse numeric-PID signalling" in (stop_process.__doc__ or "")
+    # 3.12 keeps continuation-line indent in __doc__; 3.13 dedents it.
+    stop_doc = inspect.cleandoc(stop.__doc__ or "")
+    process_doc = inspect.cleandoc(stop_process.__doc__ or "")
+    assert "There is no\nescalation to SIGKILL" in stop_doc
+    assert "tombstone is not cleared" in stop_doc
+    assert "Refuse numeric-PID signalling" in process_doc
     with pytest.raises(ProcessTombstoneError, match="numeric PID signalling is disabled"):
         stop_process(1)
 

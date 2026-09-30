@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.15.0 — 2026-09-30
 
+- Add `FetchIntent`: a concrete `SourceIntent` that runs `plan → fetch → persist`
+  with a consumer-supplied `Fetcher` and a consumer-named `Cursor`.
+- Add `SequencePlanner` and `ResumePlanner` so consumers walk opaque units or
+  resume tokens without the kit interpreting payload identity.
+- `split_range_into_days` accepts `order=` so newest-to-oldest is first-class;
+  oldest-to-newest remains the default.
+- `Cursor.as_dict` / `Cursor.from_mapping` round-trip JSON checkpoints.
 - Keep FastAPI adapter tests on HTTPX2's `AsyncClient` + `ASGITransport` only.
 - Pin the optional FastAPI extra and the `[dev]` extra/group to current
   FastAPI and HTTPX2, and keep `uv.lock` in lockstep (`uv lock --check`).

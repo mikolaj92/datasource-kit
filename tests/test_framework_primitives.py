@@ -32,6 +32,8 @@ def test_result_builders_fail_closed() -> None:
         objects=({"id": "one"},),
     )
     assert result.cursor == dk.Cursor("page", "1")
+    assert result.cursor.as_dict() == {"kind": "page", "value": "1"}
+    assert dk.Cursor.from_mapping(result.cursor.as_dict()) == result.cursor
     assert dk.completed_result(status="done").status == "done"
     assert dk.blocked_result(status="blocked", reason="rate limit").reason == "rate limit"
 
@@ -41,6 +43,8 @@ def test_result_builders_fail_closed() -> None:
         dk.working_result(status="working", cursor_kind="", cursor_value="1")
     with pytest.raises(dk.ValidationError):
         dk.blocked_result(status="blocked", reason="")
+    with pytest.raises(dk.ValidationError):
+        dk.Cursor.from_mapping({"kind": "page"})
 
 
 def test_completeness_layers_are_consumer_named_counts_only() -> None:
@@ -61,6 +65,21 @@ def test_window_split_is_inclusive_and_reversed_empty() -> None:
         dk.DayWindow(date(2024, 1, 1), date(2024, 1, 1)),
         dk.DayWindow(date(2024, 1, 2), date(2024, 1, 2)),
     ]
+    assert list(
+        dk.split_range_into_days(
+            date(2024, 1, 1), date(2024, 1, 2), order=dk.WindowOrder.NEWEST_FIRST
+        )
+    ) == [
+        dk.DayWindow(date(2024, 1, 2), date(2024, 1, 2)),
+        dk.DayWindow(date(2024, 1, 1), date(2024, 1, 1)),
+    ]
+    assert list(
+        dk.split_range_into_days(
+            date(2024, 1, 2), date(2024, 1, 1), order=dk.WindowOrder.NEWEST_FIRST
+        )
+    ) == []
+    with pytest.raises(ValueError, match="order must be one of"):
+        list(dk.split_range_into_days(date(2024, 1, 1), date(2024, 1, 1), order="sideways"))
 
 
 def test_token_bucket_acquire_and_retry(monkeypatch: pytest.MonkeyPatch) -> None:

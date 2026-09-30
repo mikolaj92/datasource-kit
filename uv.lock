@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "datasource-kit"
-version = "0.14.6"
+version = "0.15.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

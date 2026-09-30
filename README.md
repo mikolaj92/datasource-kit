@@ -16,7 +16,9 @@ It has five honest faces:
 - a tiny **execution boundary**: `ExecutionBackend`, which wraps one opaque,
   synchronous in-process callback without owning run or retry policy;
 - **autonomous worker hosts**: `WorkerHost`, which wraps consumer planning,
-  fetch, transform, and persistence intent, and the domain-blind sibling
+  fetch, transform, and persistence intent, `FetchIntent`, which runs
+  `plan -> fetch -> persist` with a consumer-supplied fetcher and a
+  consumer-named cursor, and the domain-blind sibling
   `ContinuousWorkerHost`, which repeats an opaque, already-persisted step from
   its post-step lifecycle decision;
 - a **fleet supervision face**: :mod:`datasource_kit.fleet` -- domain-blind
@@ -264,6 +266,63 @@ planner forms remain supported for compatibility. New integrations should use
 `SourceIntent` and immutable `SourceOutput`. `heartbeat` is an optional callback receiving
 `WorkerHeartbeat`; callback failures are isolated from work. `max_iterations`
 supports bounded/one-shot embedding.
+
+### Consumer fetcher and named cursor
+
+`FetchIntent` is a concrete `SourceIntent` so a consumer does not have to
+hand-roll `plan -> fetch -> persist`. Supply a `Fetcher`, a persist callback,
+and a planner that names the cursor kind. The kit never inspects payload
+identity: a timestamp may be one cursor kind the consumer chooses, not a
+record id, and oldest-to-newest is one window order, not the only one.
+
+```python
+from datetime import date
+from datasource_kit import (
+    FetchIntent, FileCheckpointStore, MockFetcher, SequencePlanner,
+    WorkerHost, WindowOrder, split_range_into_days,
+)
+
+sink = []
+
+intent = FetchIntent(
+    fetcher=MockFetcher(),                 # replace with the consumer's fetcher
+    persist=lambda payload, plan: sink.append(payload),
+    planner=SequencePlanner(
+        tuple(split_range_into_days(
+            date(2024, 1, 1), date(2024, 1, 3),
+            order=WindowOrder.NEWEST_FIRST,  # oldest-first remains the default
+        )),
+        kind="day",                          # consumer-named; "timestamp" is fine too
+        encode=lambda window: window.start.isoformat(),
+    ),
+)
+WorkerHost(intent, FileCheckpointStore("state/checkpoint.json")).run()
+```
+
+For a resume token (page, offset, timestamp, or any other consumer label),
+`ResumePlanner` uses the cursor value as the next opaque ref and reads the
+following cursor from the payload:
+
+```python
+from datasource_kit import Cursor, FetchIntent, ResumePlanner
+
+def advance(payload, plan):
+    token = payload.get("next")
+    return None if token is None else Cursor("timestamp", token)
+
+intent = FetchIntent(
+    fetcher=consumer_fetcher,
+    persist=lambda payload, plan: store.upsert(payload["items"]),
+    planner=ResumePlanner(
+        kind="timestamp",
+        start="2024-01-01T00:00:00Z",
+        advance=advance,
+    ),
+)
+```
+
+Checkpoints are `{"kind", "value"}` dicts, so `FileCheckpointStore` round-trips
+them without the kit knowing what they mean.
 
 ### Continuous post-step host
 
