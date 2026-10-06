@@ -98,6 +98,7 @@ from .protocols import (
     StoragePort,
     SupportsExistingIds,
 )
+from .publishing import Publisher, PublishReceipt, PublishRequest
 from .providers import ProviderRegistry, builtin_registry
 from .rate_limit import TokenBucket
 from .registry import Registry
@@ -129,6 +130,9 @@ from .worker import (
 )
 
 __all__ = [
+    "Publisher",
+    "PublishReceipt",
+    "PublishRequest",
     "DESIRED_DISABLED",
     "DESIRED_ENABLED",
     "DESIRED_PAUSED",
