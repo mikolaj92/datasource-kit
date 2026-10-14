@@ -57,10 +57,14 @@ def build_control_plane_router(control_plane: WorkerControlPlane) -> APIRouter:
     * ``POST /workers/{unit}/disable`` -- disable (keep-alive ``disabled``)
 
     Read routes are side-effect-free (they classify liveness without cleaning
-    stale pid files). Write routes flip the desired keep-alive state through
-    the control plane and never spawn or kill worker processes themselves. An
-    unknown unit fails closed with HTTP 404. No authentication is applied
-    here -- the host secures the router when it mounts it.
+    stale pid files). Corrupt process metadata reports ``actual="unknown"``
+    and ``pid=None``, not a stopped process. Write routes flip the desired
+    keep-alive state through the control plane and never spawn or kill worker
+    processes themselves. Only a unit outside the declared fleet returns
+    HTTP 404, with detail ``unknown worker unit: {unit!r}``. Internal errors
+    on declared units propagate to the host (normally HTTP 500), including
+    ``KeyError``. No authentication is applied here -- the host secures the
+    router when it mounts it.
     """
     try:
         from fastapi import APIRouter, HTTPException
