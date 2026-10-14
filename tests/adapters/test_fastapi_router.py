@@ -152,7 +152,7 @@ def test_router_unknown_unit_fails_closed_with_404(tmp_path: Path) -> None:
     assert _request(app, "POST", "/workers/ghost/disable").status_code == 404
 
 
-def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
+def test_router_declared_unit_with_corrupt_pid_reads_as_unknown(
     tmp_path: Path,
 ) -> None:
     # Given: a DECLARED unit whose pid.json is valid JSON but lacks a usable
@@ -174,9 +174,9 @@ def test_router_declared_unit_with_corrupt_pid_reads_as_stopped(
     single = _request(app, "GET", "/workers/eli")
     fleet = _request(app, "GET", "/workers")
 
-    # Then: corrupt runtime state on a declared unit is neither "unknown"
-    # (no 404) nor a crash (no 500) -- it reads as a normal stopped
-    # observation, and the single-unit and whole-fleet reads agree.
+    # Then: corrupt runtime state does not make the declared unit unknown to
+    # the fleet (no 404) or crash the read (no 500). Process liveness remains
+    # unknown, and the single-unit and whole-fleet reads agree.
     assert single.status_code == 200
     assert single.json()["actual"] == "unknown"
     assert single.json()["pid"] is None
