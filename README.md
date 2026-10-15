@@ -432,6 +432,82 @@ from GitHub at the `v0.7.28` tag (`record_in_process`). Fala is not published
 to PyPI; the extra carries a PEP 508 git URL so `pip` does not resolve the
 unrelated PyPI project named `fala`.
 
+### Dependency audit (2026-10-15)
+
+Scope: source `11ef06726b3c077fd6c5c624baf3b9c9876d747a`, Darwin arm64,
+CPython 3.12.13 / 3.13.13, uv 0.11.20. `L` means the tracked lock installed
+by CI's `uv run --group dev`; `U` means fresh PyPI resolution without the lock.
+Separate clean installs of `.`, `.[fastapi]`, `.[dev]`, and group `dev` passed
+`uv pip check` on both interpreters. Core installed no third-party packages.
+
+Every distribution below comes from [PyPI](https://pypi.org/simple/), with wheel
+URLs on `files.pythonhosted.org`. Version links expose release metadata, artifact
+URLs and SHA-256 hashes. Downloaded wheels matched those hashes and installed
+`Requires-Dist`; L artifacts also matched `uv.lock`. Versions are L / U;
+a single version means both. These are observations, not new pins.
+
+Paths start at datasource-kit: `F` = extra fastapi, extra dev or group dev → fastapi;
+`H` = extra dev or group dev → httpx2; `T` = extra dev or group dev → pytest.
+Braces expand to every listed parent path, recursively. All rows are active on
+both Python versions unless marked. Status/action for every active row: no
+confirmed legacy; retain the compatible requirement, not merely an old release.
+
+| Profile / condition | Distribution L / U | Complete parent paths (expanded prefixes above) |
+| --- | --- | --- |
+| F | fastapi [0.141.1](https://pypi.org/pypi/fastapi/0.141.1/json) / [0.143.1](https://pypi.org/pypi/fastapi/0.143.1/json) | F |
+| F | annotated-doc [0.0.5](https://pypi.org/pypi/annotated-doc/0.0.5/json) | F → annotated-doc |
+| F | pydantic [2.13.5](https://pypi.org/pypi/pydantic/2.13.5/json) / [2.14.1](https://pypi.org/pypi/pydantic/2.14.1/json) | F → pydantic |
+| F | annotated-types [0.8.0](https://pypi.org/pypi/annotated-types/0.8.0/json) | F → pydantic → annotated-types |
+| F | pydantic-core [2.46.5](https://pypi.org/pypi/pydantic-core/2.46.5/json) / [2.50.1](https://pypi.org/pypi/pydantic-core/2.50.1/json) | F → pydantic → pydantic-core |
+| F | typing-inspection [0.4.4](https://pypi.org/pypi/typing-inspection/0.4.4/json) | {F, F → pydantic} → typing-inspection |
+| F | starlette [1.6.0](https://pypi.org/pypi/starlette/1.6.0/json) / [1.8.0](https://pypi.org/pypi/starlette/1.8.0/json) | F → starlette |
+| F, U only | opentelemetry-api [1.45.1](https://pypi.org/pypi/opentelemetry-api/1.45.1/json) | F → opentelemetry-api |
+| F, H; non-Emscripten for H | anyio [4.15.1](https://pypi.org/pypi/anyio/4.15.1/json) | {F → starlette, H} → anyio |
+| F, H | idna [3.19](https://pypi.org/pypi/idna/3.19/json) / [3.20](https://pypi.org/pypi/idna/3.20/json) | {F → starlette → anyio, H → anyio, H} → idna |
+| F, H; conditions below | typing-extensions [4.16.0](https://pypi.org/pypi/typing-extensions/4.16.0/json) | {F, F → pydantic, F → pydantic → pydantic-core, F → typing-inspection, F → pydantic → typing-inspection, F → starlette → anyio, H → anyio, F → starlette (3.12), H (3.12), F → opentelemetry-api (U)} → typing-extensions |
+| H | httpx2 [2.12.0](https://pypi.org/pypi/httpx2/2.12.0/json) / [2.13.1](https://pypi.org/pypi/httpx2/2.13.1/json) | H |
+| H; non-Emscripten | httpcore2 [2.12.0](https://pypi.org/pypi/httpcore2/2.12.0/json) / [2.13.1](https://pypi.org/pypi/httpcore2/2.13.1/json) | H → httpcore2 |
+| H | h11 [0.16.0](https://pypi.org/pypi/h11/0.16.0/json) | H → httpcore2 → h11 |
+| H; non-Emscripten | truststore [0.10.4](https://pypi.org/pypi/truststore/0.10.4/json) / [0.10.5](https://pypi.org/pypi/truststore/0.10.5/json) | {H, H → httpcore2} → truststore |
+| T | pytest [9.1.1](https://pypi.org/pypi/pytest/9.1.1/json) | T |
+| T | iniconfig [2.3.0](https://pypi.org/pypi/iniconfig/2.3.0/json) / [2.3.1](https://pypi.org/pypi/iniconfig/2.3.1/json) | T → iniconfig |
+| T | packaging [26.3](https://pypi.org/pypi/packaging/26.3/json) | T → packaging |
+| T | pluggy [1.6.0](https://pypi.org/pypi/pluggy/1.6.0/json) / [1.7.0](https://pypi.org/pypi/pluggy/1.7.0/json) | T → pluggy |
+| T | pygments [2.21.0](https://pypi.org/pypi/pygments/2.21.0/json) | T → pygments |
+
+`typing-extensions` imports as `typing_extensions`; similarly `pydantic-core`,
+`typing-inspection`, `annotated-doc`, and `annotated-types` use underscores.
+AnyIO selects typing-extensions below Python 3.15; Starlette and HTTPX2 select
+their direct edges below 3.13. Linux x86_64 resolution matched U on both Python
+versions; this was resolution, not Linux execution. Windows-only Colorama and
+Emscripten-only httpx2-jsfetch are not installed here. Neither are Python <3.11
+exceptiongroup/tomli or unselected upstream extras.
+
+Legacy boundary: [Starlette 1.6.0 TestClient](https://github.com/Kludex/starlette/blob/1.6.0/starlette/testclient.py)
+and [1.8.0](https://github.com/Kludex/starlette/blob/1.8.0/starlette/testclient.py)
+prefer HTTPX2 but retain a deprecated HTTPX fallback. Starlette `[full]` still
+requires `httpx>=0.27,<0.29`; FastAPI `[standard]`/`[all]` require
+`httpx>=0.23,<1`. These extras are not selected, and httpx/httpcore are absent
+from every audited installation, not just the lock. Keep ASGITransport tests
+and avoid those extras. If a consumer needs them, remove the unused extra or
+wait for the parent's metadata to drop HTTPX, then resolve and verify with
+`uv pip tree --invert`, `uv pip check`, and the full suite. Do not override a
+parent's incompatible requirement. This is not a whole-tree cleanup claim.
+Fala is outside these installed profiles; its lock commit
+`36b98995f515766b867dd5e43c63799a6892aa48` matches the peeled upstream `v0.7.28` tag.
+
+Validation: before the edit, 319/319 tests passed on each Python under L;
+independent U extra-dev and group-dev installs also passed 319/319, with no
+router skips. After the edit, fresh L group-dev and U extra-dev environments
+again passed 319/319 on each Python; all 33 audit links returned HTTP 200. Core imports and the missing-FastAPI installation hint passed.
+Verified root-to-package paths (per selected root, shared paths counted):
+L 32/32 + 30/30; U fastapi 19/19 + 18/18; U dev 34/34 + 32/32;
+U group dev 34/34 + 32/32. Retained confirmed legacy: 0; legacy without
+parent: 0; legacy without action: 0. `uv lock --check` passed; the tracked lock
+is intentionally unchanged. Remote gate remains unverified: branch-protection
+API returned HTTP 401, no open PR matched `lokay/88`, and Linux suite execution
+and required-check pass/total for a final PR SHA are unavailable, not passed.
+
 ## Minimal Batch Usage
 
 ```python
