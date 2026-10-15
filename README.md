@@ -434,19 +434,16 @@ unrelated PyPI project named `fala`.
 
 ### Dependency audit (2026-10-15)
 
-Source `3400384de11073d5502fced926ee75772a34ec91`; Darwin arm64,
-CPython 3.12.13 / 3.13.13, uv 0.11.20. Versions below are tracked lock (L) /
-fresh unlocked resolution (U); a single version means both, not a new pin.
-All distributions come from [PyPI](https://pypi.org/simple/), with wheels on
-`files.pythonhosted.org`. Linked release metadata supplied SHA-256 hashes and
-`Requires-Dist`, verified against downloaded wheels and installed metadata;
-L artifacts also matched `uv.lock`.
+Source `3400384de11073d5502fced926ee75772a34ec91`: Darwin arm64,
+CPython 3.12.13 / 3.13.13, uv 0.11.20. L/U = tracked lock/fresh resolution;
+one version means both, not a pin. Sources: [PyPI](https://pypi.org/simple/),
+wheels on `files.pythonhosted.org`. Linked SHA-256 and `Requires-Dist` metadata
+matched wheels and installations; L artifacts also matched `uv.lock`.
 
-Paths start at datasource-kit: `F` = extra fastapi, extra dev or group dev → fastapi;
-`H` = extra dev or group dev → httpx2; `T` = extra dev or group dev → pytest.
-Braces expand to every listed parent path, recursively. All rows are active on
-both Python versions unless marked. Status/action for every active row: no
-confirmed legacy; retain the compatible requirement, not merely an old release.
+Paths from datasource-kit: F = extra fastapi/dev or group dev → fastapi;
+H = extra dev or group dev → httpx2; T = extra dev or group dev → pytest.
+Braces expand all parent paths. Unless marked, rows apply to both Pythons.
+All active rows: no confirmed legacy; retain compatible requirements.
 
 | Profile / condition | Distribution L / U | Complete parent paths (expanded prefixes above) |
 | --- | --- | --- |
@@ -475,31 +472,29 @@ AnyIO selects typing-extensions below Python 3.15; Starlette and HTTPX2 select
 their direct edges below 3.13. Excluded: Windows-only Colorama, Emscripten-only
 httpx2-jsfetch, Python <3.11 exceptiongroup/tomli and unselected upstream extras.
 
-Legacy boundary: [Starlette 1.6.0 TestClient](https://github.com/Kludex/starlette/blob/1.6.0/starlette/testclient.py)
-and [1.8.0](https://github.com/Kludex/starlette/blob/1.8.0/starlette/testclient.py)
-prefer HTTPX2 but retain a deprecated HTTPX fallback. Starlette `[full]` still
-requires `httpx>=0.27,<0.29`; FastAPI `[standard]`/`[all]` require
-`httpx>=0.23,<1`. These extras are not selected, and httpx/httpcore are absent
-from every audited installation, not just the lock. Keep ASGITransport tests
-and avoid those extras. If a consumer needs them, remove the unused extra or
-wait for the parent's metadata to drop HTTPX, then resolve and verify with
-`uv pip tree --invert`, `uv pip check`, and the full suite. Do not override a
-parent's incompatible requirement. This is not a whole-tree cleanup claim.
-Fala is outside these installed profiles; its lock commit
-`36b98995f515766b867dd5e43c63799a6892aa48` matches the peeled upstream `v0.7.28` tag.
+Legacy boundary: Starlette TestClient [1.6.0](https://github.com/Kludex/starlette/blob/1.6.0/starlette/testclient.py)
+/ [1.8.0](https://github.com/Kludex/starlette/blob/1.8.0/starlette/testclient.py)
+retains a deprecated HTTPX fallback. Starlette `[full]` requires
+`httpx>=0.27,<0.29`; FastAPI `[standard]`/`[all]` require `httpx>=0.23,<1`.
+These extras are unselected; httpx/httpcore are absent from all audited installs.
+Keep ASGITransport tests. Consumers should remove unused extras; otherwise wait
+for the parent's metadata to drop HTTPX, resolve again, then run
+`uv pip tree --invert`, `uv pip check` and the full suite. Do not override
+incompatible parent requirements. This is not a whole-tree cleanup claim.
+Fala is outside these profiles; lock commit
+`36b98995f515766b867dd5e43c63799a6892aa48` matches upstream `v0.7.28`.
 
-Audit results (local evidence: ignored `.venv/audit/recheck-*`):
-- Eight clean U installs (`.`, `.[fastapi]`, `.[dev]`, group dev; both Pythons)
-  passed `uv pip check`. Package coverage per Python: core 0/0, fastapi 11/11,
-  extra dev 20/20, group dev 20/20; core imports and missing-FastAPI hint passed.
-- Root-to-package paths (3.12 / 3.13, shared paths counted): U fastapi
-  19/19 + 18/18; U extra dev and group dev each 34/34 + 32/32.
-- L group-dev, U extra-dev and U group-dev suites each passed 319/319 on both
-  Pythons, without router skips. Linux x86_64 resolutions matched U;
-  Linux execution and required remote checks remain unverified.
-- Retained confirmed legacy: 0; legacy without parent: 0; without action: 0.
-  No runtime dependency change is justified. CI's tracked `uv.lock` and
-  `uv lock --check` policy remain unchanged.
+Local evidence: ignored `.venv/audit/recheck-*`.
+- Eight clean U installs (`.`, `.[fastapi]`, `.[dev]`, group dev; both Pythons):
+  `uv pip check` passed; package coverage per Python: 0/0, 11/11, 20/20, 20/20.
+  Core imports and missing-FastAPI hint passed.
+- U path coverage (3.12 / 3.13): fastapi 19/19 / 18/18;
+  extra dev and group dev each 34/34 / 32/32.
+- L group-dev, U extra-dev and U group-dev: each 319/319 tests on both Pythons,
+  no router skips. Linux x86_64 resolution matched U; Linux execution and
+  required remote checks remain unverified.
+- Confirmed retained legacy / missing parent / missing action: 0 / 0 / 0.
+  Runtime requirements and CI's tracked lock/check policy remain unchanged.
 
 ## Minimal Batch Usage
 
