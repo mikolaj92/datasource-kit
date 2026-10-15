@@ -434,17 +434,13 @@ unrelated PyPI project named `fala`.
 
 ### Dependency audit (2026-10-15)
 
-Scope: source `3400384de11073d5502fced926ee75772a34ec91`, Darwin arm64,
-CPython 3.12.13 / 3.13.13, uv 0.11.20. `L` means the tracked lock installed
-by CI's `uv run --group dev`; `U` means fresh PyPI resolution without the lock.
-Separate clean installs of `.`, `.[fastapi]`, `.[dev]`, and group `dev` passed
-`uv pip check` on both interpreters. Core installed no third-party packages.
-
-Every distribution below comes from [PyPI](https://pypi.org/simple/), with wheel
-URLs on `files.pythonhosted.org`. Version links expose release metadata, artifact
-URLs and SHA-256 hashes. Downloaded wheels matched those hashes and installed
-`Requires-Dist`; L artifacts also matched `uv.lock`. Versions are L / U;
-a single version means both. These are observations, not new pins.
+Source `3400384de11073d5502fced926ee75772a34ec91`; Darwin arm64,
+CPython 3.12.13 / 3.13.13, uv 0.11.20. Versions below are tracked lock (L) /
+fresh unlocked resolution (U); a single version means both, not a new pin.
+All distributions come from [PyPI](https://pypi.org/simple/), with wheels on
+`files.pythonhosted.org`. Linked release metadata supplied SHA-256 hashes and
+`Requires-Dist`, verified against downloaded wheels and installed metadata;
+L artifacts also matched `uv.lock`.
 
 Paths start at datasource-kit: `F` = extra fastapi, extra dev or group dev → fastapi;
 `H` = extra dev or group dev → httpx2; `T` = extra dev or group dev → pytest.
@@ -475,13 +471,9 @@ confirmed legacy; retain the compatible requirement, not merely an old release.
 | T | pluggy [1.6.0](https://pypi.org/pypi/pluggy/1.6.0/json) / [1.7.0](https://pypi.org/pypi/pluggy/1.7.0/json) | T → pluggy |
 | T | pygments [2.21.0](https://pypi.org/pypi/pygments/2.21.0/json) | T → pygments |
 
-`typing-extensions` imports as `typing_extensions`; similarly `pydantic-core`,
-`typing-inspection`, `annotated-doc`, and `annotated-types` use underscores.
 AnyIO selects typing-extensions below Python 3.15; Starlette and HTTPX2 select
-their direct edges below 3.13. Linux x86_64 resolution matched U on both Python
-versions; this was resolution, not Linux execution. Windows-only Colorama and
-Emscripten-only httpx2-jsfetch are not installed here. Neither are Python <3.11
-exceptiongroup/tomli or unselected upstream extras.
+their direct edges below 3.13. Excluded: Windows-only Colorama, Emscripten-only
+httpx2-jsfetch, Python <3.11 exceptiongroup/tomli and unselected upstream extras.
 
 Legacy boundary: [Starlette 1.6.0 TestClient](https://github.com/Kludex/starlette/blob/1.6.0/starlette/testclient.py)
 and [1.8.0](https://github.com/Kludex/starlette/blob/1.8.0/starlette/testclient.py)
@@ -496,25 +488,18 @@ parent's incompatible requirement. This is not a whole-tree cleanup claim.
 Fala is outside these installed profiles; its lock commit
 `36b98995f515766b867dd5e43c63799a6892aa48` matches the peeled upstream `v0.7.28` tag.
 
-Recheck: eight fresh U installations passed `uv pip check`; package coverage
-per Python is core 0/0, fastapi 11/11, extra dev 20/20, group dev 20/20.
-All 20 U releases were checked against PyPI wheel URLs, SHA-256 hashes and
-installed `Requires-Dist`. Local evidence is in ignored `.venv/audit/recheck-*`
-(metadata, trees, inverse trees, expanded paths and suite logs).
-Verified root-to-package paths (3.12 / 3.13, shared paths counted):
-U fastapi 19/19 + 18/18; U dev 34/34 + 32/32; U group dev 34/34 + 32/32.
-Before this edit, L group-dev and independent U extra-dev and group-dev suites
-each passed 319/319 on both Python versions, without router skips; all six
-suites passed again after the edit. Core imports and the missing-FastAPI
-installation hint passed. Linux resolutions matched U;
-Linux execution remains unverified. Retained confirmed legacy: 0; legacy without
-parent: 0; legacy without action: 0. No runtime dependency change is justified.
-
-Lock-policy discrepancy with the requested audit: `uv.lock` is tracked, not
-ignored, and CI requires `uv lock --check`; preserve that existing policy.
-Required remote checks and their pass/total remain unknown for the final SHA.
-No authenticated GitHub access was attempted during this recheck. Local success
-is not acceptance of the remote gate or a whole-tree cleanup claim.
+Audit results (local evidence: ignored `.venv/audit/recheck-*`):
+- Eight clean U installs (`.`, `.[fastapi]`, `.[dev]`, group dev; both Pythons)
+  passed `uv pip check`. Package coverage per Python: core 0/0, fastapi 11/11,
+  extra dev 20/20, group dev 20/20; core imports and missing-FastAPI hint passed.
+- Root-to-package paths (3.12 / 3.13, shared paths counted): U fastapi
+  19/19 + 18/18; U extra dev and group dev each 34/34 + 32/32.
+- L group-dev, U extra-dev and U group-dev suites each passed 319/319 on both
+  Pythons, without router skips. Linux x86_64 resolutions matched U;
+  Linux execution and required remote checks remain unverified.
+- Retained confirmed legacy: 0; legacy without parent: 0; without action: 0.
+  No runtime dependency change is justified. CI's tracked `uv.lock` and
+  `uv lock --check` policy remain unchanged.
 
 ## Minimal Batch Usage
 
