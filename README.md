@@ -434,7 +434,7 @@ unrelated PyPI project named `fala`.
 
 ### Dependency audit (2026-10-15)
 
-Scope: source `11ef06726b3c077fd6c5c624baf3b9c9876d747a`, Darwin arm64,
+Scope: source `3400384de11073d5502fced926ee75772a34ec91`, Darwin arm64,
 CPython 3.12.13 / 3.13.13, uv 0.11.20. `L` means the tracked lock installed
 by CI's `uv run --group dev`; `U` means fresh PyPI resolution without the lock.
 Separate clean installs of `.`, `.[fastapi]`, `.[dev]`, and group `dev` passed
@@ -454,7 +454,7 @@ confirmed legacy; retain the compatible requirement, not merely an old release.
 
 | Profile / condition | Distribution L / U | Complete parent paths (expanded prefixes above) |
 | --- | --- | --- |
-| F | fastapi [0.141.1](https://pypi.org/pypi/fastapi/0.141.1/json) / [0.143.1](https://pypi.org/pypi/fastapi/0.143.1/json) | F |
+| F | fastapi [0.141.1](https://pypi.org/pypi/fastapi/0.141.1/json) / [0.143.2](https://pypi.org/pypi/fastapi/0.143.2/json) | F |
 | F | annotated-doc [0.0.5](https://pypi.org/pypi/annotated-doc/0.0.5/json) | F → annotated-doc |
 | F | pydantic [2.13.5](https://pypi.org/pypi/pydantic/2.13.5/json) / [2.14.1](https://pypi.org/pypi/pydantic/2.14.1/json) | F → pydantic |
 | F | annotated-types [0.8.0](https://pypi.org/pypi/annotated-types/0.8.0/json) | F → pydantic → annotated-types |
@@ -496,17 +496,25 @@ parent's incompatible requirement. This is not a whole-tree cleanup claim.
 Fala is outside these installed profiles; its lock commit
 `36b98995f515766b867dd5e43c63799a6892aa48` matches the peeled upstream `v0.7.28` tag.
 
-Validation: before the edit, 319/319 tests passed on each Python under L;
-independent U extra-dev and group-dev installs also passed 319/319, with no
-router skips. After the edit, fresh L group-dev and U extra-dev environments
-again passed 319/319 on each Python; all 33 audit links returned HTTP 200. Core imports and the missing-FastAPI installation hint passed.
-Verified root-to-package paths (per selected root, shared paths counted):
-L 32/32 + 30/30; U fastapi 19/19 + 18/18; U dev 34/34 + 32/32;
-U group dev 34/34 + 32/32. Retained confirmed legacy: 0; legacy without
-parent: 0; legacy without action: 0. `uv lock --check` passed; the tracked lock
-is intentionally unchanged. Remote gate remains unverified: branch-protection
-API returned HTTP 401, no open PR matched `lokay/88`, and Linux suite execution
-and required-check pass/total for a final PR SHA are unavailable, not passed.
+Recheck: eight fresh U installations passed `uv pip check`; package coverage
+per Python is core 0/0, fastapi 11/11, extra dev 20/20, group dev 20/20.
+All 20 U releases were checked against PyPI wheel URLs, SHA-256 hashes and
+installed `Requires-Dist`. Local evidence is in ignored `.venv/audit/recheck-*`
+(metadata, trees, inverse trees, expanded paths and suite logs).
+Verified root-to-package paths (3.12 / 3.13, shared paths counted):
+U fastapi 19/19 + 18/18; U dev 34/34 + 32/32; U group dev 34/34 + 32/32.
+Before this edit, L group-dev and independent U extra-dev and group-dev suites
+each passed 319/319 on both Python versions, without router skips; all six
+suites passed again after the edit. Core imports and the missing-FastAPI
+installation hint passed. Linux resolutions matched U;
+Linux execution remains unverified. Retained confirmed legacy: 0; legacy without
+parent: 0; legacy without action: 0. No runtime dependency change is justified.
+
+Lock-policy discrepancy with the requested audit: `uv.lock` is tracked, not
+ignored, and CI requires `uv lock --check`; preserve that existing policy.
+Required remote checks and their pass/total remain unknown for the final SHA.
+No authenticated GitHub access was attempted during this recheck. Local success
+is not acceptance of the remote gate or a whole-tree cleanup claim.
 
 ## Minimal Batch Usage
 
