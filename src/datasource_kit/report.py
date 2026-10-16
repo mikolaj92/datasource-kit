@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +11,7 @@ from .completeness import CompletenessReport
 
 __all__ = ["IngestReport"]
 
-_KIT_VERSION = version("datasource-kit")
+_KIT_VERSION = "0.15.0"
 
 
 @dataclass
