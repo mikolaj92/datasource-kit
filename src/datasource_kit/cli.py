@@ -23,7 +23,6 @@ from .runtime import run_ingest
 
 __all__ = ["main"]
 
-# Shipped demo profiles are package data, so this works from wheels and sdists.
 EXAMPLE_ROOT = Path(__file__).resolve().parent / "examples" / "sources"
 
 
