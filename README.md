@@ -79,6 +79,22 @@ A consumer supplies two things:
 - **Not a scheduler, cron, or daemon**. The `fleet` module provides process
   primitives only; policy stays in the consumer.
 
+## Optional publication capability
+
+`datasource_kit.publishing` exports `Publisher`, `PublishRequest` and
+`PublishReceipt` (also available at package root). This structural protocol is
+independent of the read protocols: read-only sources need no publication stubs.
+
+A request carries a non-empty `operation_id`, opaque `target` and opaque
+`payload`. A receipt carries the operation ID, `confirmed`, `rejected` or
+`unknown`, an optional `external_id`, and opaque provider `details`.
+
+The kit does not define posts, credentials, approval policy, scheduling or
+publication retries. An operation ID provides correlation, **not** an upstream
+idempotency guarantee. `unknown` means the caller must reconcile the outcome
+before deciding whether to retry. Implementations and consumers own that
+reconciliation. Publication never runs implicitly as part of ingest.
+
 ## Fleet Supervision
 
 The `datasource_kit.fleet` module provides stdlib-only process supervision
