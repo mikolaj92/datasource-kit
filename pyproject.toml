@@ -16,7 +16,7 @@ dependencies = []
 datasource-kit = "datasource_kit.cli:main"
 
 [project.optional-dependencies]
-fala = ["fala @ git+https://github.com/mikolaj92/Fala.git@v0.8.1"]
+fala = ["fala @ https://github.com/mikolaj92/Fala/archive/27c179aee96daf6953ef36d6b1a007214d14a0db.tar.gz"]
 # YAML profile loading only; JSON profiles are the dep-free default.
 profiles = ["pyyaml>=6.0"]
 # Optional FastAPI control-plane router; the core stays HTTP-framework-free.
@@ -29,9 +29,6 @@ dev = ["pytest>=8.0", "fastapi>=0.141.1", "httpx2>=2.12.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "fastapi>=0.141.1", "httpx2>=2.12.0"]
-
-[tool.uv.sources]
-fala = { git = "https://github.com/mikolaj92/Fala", tag = "v0.8.1" }
 
 [build-system]
 requires = ["hatchling"]

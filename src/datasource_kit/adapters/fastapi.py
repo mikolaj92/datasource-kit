@@ -1,19 +1,3 @@
-"""Optional FastAPI adapter: an ``APIRouter`` over :class:`WorkerControlPlane`.
-
-Mirrors the ``fala`` artifact-store adapter (and, in the consuming host, the
-my-auth / my-usermanager pattern): the third-party dependency is imported
-lazily inside the factory, so importing this module never pulls in FastAPI.
-Install the extra to use it::
-
-    pip install datasource-kit[fastapi]
-
-The factory returns a bare :class:`~fastapi.APIRouter` that the host mounts
-under its own prefix and security dependencies -- the adapter itself carries
-no authentication and never touches worker processes directly. Every route
-delegates to the control plane, which is the only thing that reads liveness or
-flips desired state.
-"""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
