@@ -72,7 +72,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fala", marker = "extra == 'fala'", git = "https://github.com/mikolaj92/Fala?tag=v0.7.28" },
+    { name = "fala", marker = "extra == 'fala'", git = "https://github.com/mikolaj92/Fala?tag=v0.8.1" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.141.1" },
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.141.1" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.12.0" },
@@ -90,8 +90,8 @@ dev = [
 
 [[package]]
 name = "fala"
-version = "0.7.28"
-source = { git = "https://github.com/mikolaj92/Fala?tag=v0.7.28#36b98995f515766b867dd5e43c63799a6892aa48" }
+version = "0.8.1"
+source = { git = "https://github.com/mikolaj92/Fala?tag=v0.8.1#27c179aee96daf6953ef36d6b1a007214d14a0db" }
 
 [[package]]
 name = "fastapi"
