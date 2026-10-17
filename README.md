@@ -432,6 +432,70 @@ from GitHub at the `v0.7.28` tag (`record_in_process`). Fala is not published
 to PyPI; the extra carries a PEP 508 git URL so `pip` does not resolve the
 unrelated PyPI project named `fala`.
 
+### Dependency audit (2026-10-15)
+
+Source `3400384de11073d5502fced926ee75772a34ec91`: Darwin arm64,
+CPython 3.12.13 / 3.13.13, uv 0.11.20. L/U = tracked lock/fresh resolution;
+one version means both, not a pin. Sources: [PyPI](https://pypi.org/simple/),
+wheels on `files.pythonhosted.org`. Linked SHA-256 and `Requires-Dist` metadata
+matched wheels and installations; L artifacts also matched `uv.lock`.
+
+Paths from datasource-kit: F = extra fastapi/dev or group dev → fastapi;
+H = extra dev or group dev → httpx2; T = extra dev or group dev → pytest.
+Braces expand all parent paths. Unless marked, rows apply to both Pythons.
+All active rows: no confirmed legacy; retain compatible requirements.
+
+| Profile / condition | Distribution L / U | Complete parent paths (expanded prefixes above) |
+| --- | --- | --- |
+| F | fastapi [0.141.1](https://pypi.org/pypi/fastapi/0.141.1/json) / [0.143.2](https://pypi.org/pypi/fastapi/0.143.2/json) | F |
+| F | annotated-doc [0.0.5](https://pypi.org/pypi/annotated-doc/0.0.5/json) | F → annotated-doc |
+| F | pydantic [2.13.5](https://pypi.org/pypi/pydantic/2.13.5/json) / [2.14.1](https://pypi.org/pypi/pydantic/2.14.1/json) | F → pydantic |
+| F | annotated-types [0.8.0](https://pypi.org/pypi/annotated-types/0.8.0/json) | F → pydantic → annotated-types |
+| F | pydantic-core [2.46.5](https://pypi.org/pypi/pydantic-core/2.46.5/json) / [2.50.1](https://pypi.org/pypi/pydantic-core/2.50.1/json) | F → pydantic → pydantic-core |
+| F | typing-inspection [0.4.4](https://pypi.org/pypi/typing-inspection/0.4.4/json) | {F, F → pydantic} → typing-inspection |
+| F | starlette [1.6.0](https://pypi.org/pypi/starlette/1.6.0/json) / [1.8.0](https://pypi.org/pypi/starlette/1.8.0/json) | F → starlette |
+| F, U only | opentelemetry-api [1.45.1](https://pypi.org/pypi/opentelemetry-api/1.45.1/json) | F → opentelemetry-api |
+| F, H; non-Emscripten for H | anyio [4.15.1](https://pypi.org/pypi/anyio/4.15.1/json) | {F → starlette, H} → anyio |
+| F, H | idna [3.19](https://pypi.org/pypi/idna/3.19/json) / [3.20](https://pypi.org/pypi/idna/3.20/json) | {F → starlette → anyio, H → anyio, H} → idna |
+| F, H; conditions below | typing-extensions [4.16.0](https://pypi.org/pypi/typing-extensions/4.16.0/json) | {F, F → pydantic, F → pydantic → pydantic-core, F → typing-inspection, F → pydantic → typing-inspection, F → starlette → anyio, H → anyio, F → starlette (3.12), H (3.12), F → opentelemetry-api (U)} → typing-extensions |
+| H | httpx2 [2.12.0](https://pypi.org/pypi/httpx2/2.12.0/json) / [2.13.1](https://pypi.org/pypi/httpx2/2.13.1/json) | H |
+| H; non-Emscripten | httpcore2 [2.12.0](https://pypi.org/pypi/httpcore2/2.12.0/json) / [2.13.1](https://pypi.org/pypi/httpcore2/2.13.1/json) | H → httpcore2 |
+| H | h11 [0.16.0](https://pypi.org/pypi/h11/0.16.0/json) | H → httpcore2 → h11 |
+| H; non-Emscripten | truststore [0.10.4](https://pypi.org/pypi/truststore/0.10.4/json) / [0.10.5](https://pypi.org/pypi/truststore/0.10.5/json) | {H, H → httpcore2} → truststore |
+| T | pytest [9.1.1](https://pypi.org/pypi/pytest/9.1.1/json) | T |
+| T | iniconfig [2.3.0](https://pypi.org/pypi/iniconfig/2.3.0/json) / [2.3.1](https://pypi.org/pypi/iniconfig/2.3.1/json) | T → iniconfig |
+| T | packaging [26.3](https://pypi.org/pypi/packaging/26.3/json) | T → packaging |
+| T | pluggy [1.6.0](https://pypi.org/pypi/pluggy/1.6.0/json) / [1.7.0](https://pypi.org/pypi/pluggy/1.7.0/json) | T → pluggy |
+| T | pygments [2.21.0](https://pypi.org/pypi/pygments/2.21.0/json) | T → pygments |
+
+AnyIO selects typing-extensions below Python 3.15; Starlette and HTTPX2 select
+their direct edges below 3.13. Excluded: Windows-only Colorama, Emscripten-only
+httpx2-jsfetch, Python <3.11 exceptiongroup/tomli and unselected upstream extras.
+
+Legacy boundary: Starlette TestClient [1.6.0](https://github.com/Kludex/starlette/blob/1.6.0/starlette/testclient.py)
+/ [1.8.0](https://github.com/Kludex/starlette/blob/1.8.0/starlette/testclient.py)
+retains a deprecated HTTPX fallback. Starlette `[full]` requires
+`httpx>=0.27,<0.29`; FastAPI `[standard]`/`[all]` require `httpx>=0.23,<1`.
+These extras are unselected; httpx/httpcore are absent from all audited installs.
+Keep ASGITransport tests. Consumers should remove unused extras; otherwise wait
+for the parent's metadata to drop HTTPX, resolve again, then run
+`uv pip tree --invert`, `uv pip check` and the full suite. Do not override
+incompatible parent requirements. This is not a whole-tree cleanup claim.
+Fala is outside these profiles; lock commit
+`36b98995f515766b867dd5e43c63799a6892aa48` matches upstream `v0.7.28`.
+
+Local evidence: ignored `.venv/audit/recheck-*`.
+- Eight clean U installs (`.`, `.[fastapi]`, `.[dev]`, group dev; both Pythons):
+  `uv pip check` passed; package coverage per Python: 0/0, 11/11, 20/20, 20/20.
+  Core imports and missing-FastAPI hint passed.
+- U path coverage (3.12 / 3.13): fastapi 19/19 / 18/18;
+  extra dev and group dev each 34/34 / 32/32.
+- L group-dev, U extra-dev and U group-dev: each 319/319 tests on both Pythons,
+  no router skips. Linux x86_64 resolution matched U; Linux execution and
+  required remote checks remain unverified.
+- Confirmed retained legacy / missing parent / missing action: 0 / 0 / 0.
+  Runtime requirements and CI's tracked lock/check policy remain unchanged.
+
 ## Minimal Batch Usage
 
 ```python
