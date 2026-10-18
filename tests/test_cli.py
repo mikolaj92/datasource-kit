@@ -14,6 +14,9 @@ from datasource_kit.providers import builtin_registry
 from datasource_kit.report import IngestReport
 
 
+# Helpers
+
+
 @pytest.fixture()
 def demo_scraper(tmp_path: Path) -> Path:
     """A minimal scraper profile in a temp folder."""
@@ -56,6 +59,9 @@ def demo_batch(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# validate verb
+
+
 def test_validate_demo_scraper_ok(demo_scraper: Path) -> None:
     assert main(["validate", str(demo_scraper)]) == 0
 
@@ -83,6 +89,9 @@ def test_validate_unknown_provider_nonzero(tmp_path: Path) -> None:
     assert main(["validate", str(tmp_path)]) != 0
 
 
+# run verb
+
+
 def test_run_writes_json(demo_scraper: Path, tmp_path: Path) -> None:
     out = tmp_path / "report.json"
     rc = main(["run", str(demo_scraper), "--out", str(out)])
@@ -95,16 +104,13 @@ def test_run_writes_json(demo_scraper: Path, tmp_path: Path) -> None:
     expected = version("datasource-kit")
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     assert data["kit_version"] == expected == project["project"]["version"]
-    for report in (IngestReport("test-scraper"), IngestReport.from_dict({})):
-        assert report.as_dict()["kit_version"] == expected
-        report.save_json(out)
-        assert IngestReport.load_json(out).kit_version == expected
-    for report in (
-        IngestReport("old", kit_version="0.14.0"),
-        IngestReport.from_dict({"source_name": "old", "kit_version": "0.14.0"}),
+    for report, expected_version in (
+        (IngestReport("test-scraper"), expected), (IngestReport.from_dict({}), expected),
+        (IngestReport("old", kit_version="0.14.0"), "0.14.0"),
+        (IngestReport.from_dict({"source_name": "old", "kit_version": "0.14.0"}), "0.14.0"),
     ):
         report.save_json(out)
-        assert json.loads(out.read_text())["kit_version"] == "0.14.0"
+        assert json.loads(out.read_text())["kit_version"] == expected_version
         assert IngestReport.load_json(out).as_dict() == report.as_dict()
 
 
