@@ -108,11 +108,6 @@ stays in the consuming project.
 
 ### Desired-state reconciliation
 
-`DesiredStateReconciler` builds a generic supervisor on those primitives: the
-consumer declares which units should be running and the reconciler converges
-reality to that declaration, without each consumer re-implementing the
-lock / generation-fencing / atomic-write mechanics.
-
 - Per-unit `state.json` (desired / actual / generation), written atomically;
   `write_json_atomic` / `read_json` are exposed for reuse.
 - **Generation fencing**: each (re)spawn increments a generation and the child
