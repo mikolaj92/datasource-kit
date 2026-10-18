@@ -404,13 +404,9 @@ callback are forwarded unchanged. Fala owns validation, recording, exact-once
 callback invocation, and return/exception semantics. The caller still creates
 and finalizes the run and owns IDs, retries, and result lifetime.
 
-A custom backend may add observation or durable recording, but concurrency and
-recording policy are its own responsibility.
-
-This boundary intentionally does **not** create or finalize runs, mint IDs,
-retry, checkpoint, persist business data, clean results, or manage result
-lifetimes. The optional Fala execution adapter is not imported by the
-dependency-free core.
+Custom backends own concurrency and recording policy. This boundary does not
+create or finalize runs, mint IDs, retry, checkpoint, persist business data,
+clean results, or manage result lifetimes.
 
 ## Install
 
@@ -431,6 +427,10 @@ The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
 0.8.1 for execution (`record_in_process`), not artifact storage, from a
 [commit-pinned archive](https://github.com/mikolaj92/Fala/archive/27c179aee96daf6953ef36d6b1a007214d14a0db.tar.gz).
 Installation needs no Git fetch and does not resolve the unrelated PyPI project named `fala`.
+
+`build_control_plane_router` imports FastAPI lazily and returns an `APIRouter`
+for the host to mount with its own prefix and authentication dependencies.
+Routes delegate to `WorkerControlPlane`; they never start or stop processes.
 
 ## Minimal Batch Usage
 
