@@ -110,7 +110,7 @@ from .protocols import (
     SupportsExistingIds,
 )
 from .providers import ProviderRegistry, builtin_registry
-from .rate_limit import TokenBucket
+from .ratelimit import TokenBucket
 from .registry import Registry
 from .report import IngestReport
 from .results import (
