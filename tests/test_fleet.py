@@ -69,6 +69,8 @@ def test_spawn_contract_matches_readme_and_docstring() -> None:
     text = readme.read_text(encoding="utf-8")
     assert '`spawn(spec) -> SpawnResult` -- first-launch-only subprocess launch' in text
     assert '`spawn` writes `pid.json` with\n`status="launch_intent"` before `Popen`' in text
+    assert "The session-leader exec gate waits for that\ndurable provenance (`unit`, `generation`, stable random `token`) before executing\nconsumer code." in text
+    assert "The default launch passes consumer-declared specs to `spawn` without bypassing\nits first-launch-only fence." in text
     assert "Launch failure or immediate exit leaves the metadata in place." in text
     assert "Existing\n`pid.json` metadata blocks launch regardless of PID liveness" in text
     assert "Any surviving metadata is a\ntombstone, regardless of PID liveness or readability, and prevents automatic replacement." in text
