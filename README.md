@@ -88,14 +88,12 @@ primitives for long-lived worker OS processes:
   including optional consumer-owned append paths for stdout/stderr (or an
   injected opener), immediate-exit probe timing, environment overlay and
   generation injection, and opaque JSON pid metadata.
-- `spawn(spec) -> SpawnResult` -- first-launch-only: writes `pid.json` with
-  `status="launch_intent"` before `Popen`, then starts a subprocess with
-  `start_new_session` and a fail-closed immediate-exit probe. Immediate exit
-  leaves the tombstone; presence of the file blocks automatic relaunch.
-- `stop(unit_dir) -> StopResult` -- requests cooperative termination only
-  through the live `Popen` handle owned by this supervisor. It never sends
-  SIGKILL, never signals a numeric PID, and never clears the process tombstone.
+- `spawn(spec) -> SpawnResult` -- first-launch-only subprocess launch with
+  `start_new_session` and an immediate-exit probe.
+- `stop(unit_dir) -> StopResult` -- requests cooperative termination;
   `StopResult.killed` and `cleaned` stay `False`.
+  See [Fail-closed process lifecycle](#fail-closed-process-lifecycle) for launch
+  persistence, termination authority, and operator clearance.
 - `stop_process(pid)` -- rejected numeric-PID primitive; always raises
   `ProcessTombstoneError` because a PID cannot prove process identity.
 - `liveness(unit_dir) -> Liveness` -- returns `"running"` or `"stale"` from
@@ -108,14 +106,14 @@ stays in the consuming project.
 
 ### Desired-state reconciliation
 
-`DesiredStateReconciler` builds a generic supervisor on those primitives: the
-consumer declares which units should be running and the reconciler converges
-reality to that declaration, without each consumer re-implementing the
-lock / generation-fencing / atomic-write mechanics.
+`DesiredStateReconciler` applies consumer-declared desired state without
+re-implementing lock / generation-fencing / atomic-write mechanics. Existing
+`pid.json` metadata blocks launch regardless of PID liveness; observation reports
+running-or-unknown, not verified workload health.
 
 - Per-unit `state.json` (desired / actual / generation), written atomically;
   `write_json_atomic` / `read_json` are exposed for reuse.
-- **Generation fencing**: each (re)spawn increments a generation and the child
+- **Generation fencing**: each launch increments a generation and the child
   is spawned aware of it (the default action injects `DATASOURCE_KIT_GENERATION`;
   a consumer that injects its own spawn action picks its own variable). A
   `merge_heartbeat` is accepted only when the reporting generation matches, so a
@@ -128,8 +126,9 @@ lock / generation-fencing / atomic-write mechanics.
   `policy` is a consumer hook (`honor_desired_state` is the default) deciding
   per unit whether it should run -- the kit never decides which units run.
 
-The default launch handles rich, consumer-declared process specs directly;
-launch/stop remain injectable (`spawn_action` / `stop_action`). For example:
+The default launch passes consumer-declared specs to `spawn` without bypassing
+its first-launch-only fence. Launch/stop remain injectable (`spawn_action` /
+`stop_action`). For example:
 
 ```python
 spec = ProcessSpec(
@@ -148,11 +147,8 @@ spec = ProcessSpec(
 Paths and names remain consumer-owned. Environment values are used only for
 launch and are never serialized into `pid.json`; opaque pid metadata must be
 JSON-compatible and cannot replace the standard pid fields. Parent-side log
-descriptors are closed after spawning. `pid.json` is established as a durable
-`launch_intent` fence before `Popen`; surviving the probe window does not create
-the file, and immediate exit does not remove it. Presence of the file is a
-tombstone that prevents automatic replacement. No health semantics beyond
-process liveness -- health interpretation stays in the consumer.
+descriptors are closed after spawning. Health interpretation stays in the
+consumer.
 
 ### Generic fleet pass hosting
 
@@ -489,7 +485,8 @@ FastAPI adapter tests drive the router with `httpx2.AsyncClient` and
 Fleet worker launch is deliberately first-launch-only. `spawn` writes `pid.json` with
 `status="launch_intent"` before `Popen`. The session-leader exec gate waits for that
 durable provenance (`unit`, `generation`, stable random `token`) before executing
-consumer code. Immediate exit does not remove the file. Any surviving metadata is a
+consumer code. Launch failure or immediate exit leaves the metadata in place.
+Any surviving metadata is a
 tombstone, regardless of PID liveness or readability, and prevents automatic replacement.
 Disabling never removes it.
 The owning in-memory supervisor may request cooperative TERM through its live `Popen`

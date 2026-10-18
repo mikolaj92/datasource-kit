@@ -67,13 +67,10 @@ def test_spawn_contract_matches_readme_and_docstring() -> None:
     """Public spawn docs match fence-before-exec, not post-probe pid.json."""
     readme = Path(__file__).resolve().parents[1] / "README.md"
     text = readme.read_text(encoding="utf-8")
-    assert '`spawn(spec) -> SpawnResult` -- first-launch-only: writes `pid.json` with' in text
-    assert '`status="launch_intent"` before `Popen`' in text
-    assert "Immediate exit\n  leaves the tombstone; presence of the file blocks automatic relaunch." in text
-    assert "`pid.json` is established as a durable\n`launch_intent` fence before `Popen`" in text
-    assert "surviving the probe window does not create\nthe file, and immediate exit does not remove it." in text
-    assert "Presence of the file is a\ntombstone that prevents automatic replacement." in text
-    assert "Immediate exit does not remove the file." in text
+    assert '`spawn(spec) -> SpawnResult` -- first-launch-only subprocess launch' in text
+    assert '`spawn` writes `pid.json` with\n`status="launch_intent"` before `Popen`' in text
+    assert "Launch failure or immediate exit leaves the metadata in place." in text
+    assert "Existing\n`pid.json` metadata blocks launch regardless of PID liveness" in text
     assert "Any surviving metadata is a\ntombstone, regardless of PID liveness or readability, and prevents automatic replacement." in text
     assert "after the child survives its probe window, and immediate exit leaves none" not in text
     assert "writes pid.json atomically, and performs a fail-closed immediate-exit probe." not in text
@@ -373,7 +370,8 @@ def test_stop_contract_matches_readme_and_docstring(tmp_path: Path) -> None:
     readme = Path(__file__).resolve().parents[1] / "README.md"
     text = readme.read_text(encoding="utf-8")
     assert "`stop(unit_dir) -> StopResult`" in text
-    assert "never sends\n  SIGKILL, never signals a numeric PID, and never clears the process tombstone." in text
+    assert "cooperative TERM through its live `Popen`\nhandle" in text
+    assert "Disabling never removes it." in text
     assert "`StopResult.killed` and `cleaned` stay `False`." in text
     assert "`stop_process(pid)` -- rejected numeric-PID primitive" in text
     assert "no numeric-PID signalling, escalation, adoption, guardian cleanup, or restart is" in text
