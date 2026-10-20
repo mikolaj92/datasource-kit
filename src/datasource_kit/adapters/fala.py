@@ -77,8 +77,11 @@ class FalaExecutionBackend:
 
         try:
             record_in_process = fala.record_in_process
-        except AttributeError as exc:
-            raise RuntimeError(_EXECUTION_CAPABILITY_ERROR) from exc
+        except AttributeError:
+            try:
+                from fala.host import record_in_process
+            except (ImportError, AttributeError) as exc:
+                raise RuntimeError(_EXECUTION_CAPABILITY_ERROR) from exc
 
         if not callable(record_in_process):
             raise RuntimeError(_EXECUTION_CAPABILITY_ERROR)  # noqa: TRY004
