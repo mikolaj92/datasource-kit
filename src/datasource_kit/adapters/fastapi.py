@@ -1,7 +1,5 @@
 """Optional FastAPI adapter: an ``APIRouter`` over :class:`WorkerControlPlane`.
 
-The third-party dependency is imported lazily inside the factory, so importing
-this module never pulls in FastAPI.
 Install the extra to use it::
 
     pip install datasource-kit[fastapi]
