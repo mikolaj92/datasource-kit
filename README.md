@@ -393,7 +393,7 @@ backend = FalaExecutionBackend("journal.sqlite")
 summary = backend.execute(request, perform_step)
 ```
 
-This is a thin adapter over Fala 0.7.28's public `record_in_process` API:
+This is a thin adapter over Fala 0.7.28's public `fala.host.record_in_process` API:
 `run_id`, `execution_id` (as Fala's `process_id`), `inputs`, `metadata`, and the
 callback are forwarded unchanged. Fala owns validation, recording, exact-once
 callback invocation, and return/exception semantics. The caller still creates
