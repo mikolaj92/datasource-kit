@@ -424,7 +424,7 @@ pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 
 The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
 from an HTTPS archive pinned to commit `27c179aee96daf6953ef36d6b1a007214d14a0db` (0.8.1), without git fetch or the unrelated PyPI `fala`.
-Durable execution also requires Fala's native libraries and the Mojo toolchain; installing the extra alone does not provide them.
+Durable execution also requires Fala's Mojo sources (set `FALA_HOME` to a Fala checkout), native libraries, and the Mojo toolchain; installing the extra alone does not provide them.
 
 ## Minimal Batch Usage
 
