@@ -1,5 +1,8 @@
 """Optional FastAPI adapter: an ``APIRouter`` over :class:`WorkerControlPlane`.
 
+Mirrors the ``fala`` artifact-store adapter (and, in the consuming host, the
+my-auth / my-usermanager pattern): the third-party dependency is imported
+lazily inside the factory, so importing this module never pulls in FastAPI.
 Install the extra to use it::
 
     pip install datasource-kit[fastapi]
