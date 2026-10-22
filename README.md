@@ -393,7 +393,7 @@ backend = FalaExecutionBackend("journal.sqlite")
 summary = backend.execute(request, perform_step)
 ```
 
-This is a thin adapter over Fala 0.8.1's public `fala.host.record_in_process` API:
+This is a thin adapter over Fala 0.7.28's public `record_in_process` API:
 `run_id`, `execution_id` (as Fala's `process_id`), `inputs`, `metadata`, and the
 callback are forwarded unchanged. Fala owns validation, recording, exact-once
 callback invocation, and return/exception semantics. The caller still creates
@@ -423,8 +423,9 @@ pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 ```
 
 The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
-from an HTTPS archive pinned to commit `27c179aee96daf6953ef36d6b1a007214d14a0db` (0.8.1), without git fetch or the unrelated PyPI `fala`.
-Durable execution also requires Fala's Mojo sources (set `FALA_HOME` to a Fala checkout), native libraries, and the Mojo toolchain; installing the extra alone does not provide them.
+from GitHub at the `v0.7.28` tag (`record_in_process`). Fala is not published
+to PyPI; the extra carries a PEP 508 git URL so `pip` does not resolve the
+unrelated PyPI project named `fala`.
 
 ## Minimal Batch Usage
 
