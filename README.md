@@ -404,7 +404,8 @@ recording policy are its own responsibility.
 
 This boundary intentionally does **not** create or finalize runs, mint IDs,
 retry, checkpoint, persist business data, clean results, or manage result
-lifetimes. The optional Fala execution adapter is not imported by the core.
+lifetimes. The optional Fala execution and artifact adapters are separate; neither
+is imported by the dependency-free core.
 
 ## Install
 
@@ -417,7 +418,7 @@ Core has no third-party runtime dependencies. Optional integrations are lazy:
 
 ```bash
 pip install "datasource-kit[profiles]"   # YAML profile loading
-pip install "datasource-kit[fala]"       # Fala execution adapter
+pip install "datasource-kit[fala]"       # Fala execution + artifact adapters
 pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 ```
 
