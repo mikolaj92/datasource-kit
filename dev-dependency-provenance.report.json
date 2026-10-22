@@ -1,0 +1,114 @@
+{
+  "tytuł": "Zależności dev bez jawnego dodatku routera i dev z routerem",
+  "data_UTC": "2026-10-22",
+  "repozytorium_HEAD": "64878d647e9505bc0c60cd5b4719364054d9a598",
+  "środowisko": {
+    "python": "3.12.9 (main, Feb 12 2025, 15:09:19) [Clang 19.1.6 ]",
+    "platforma": "macOS-27.0.1-arm64-arm-64bit",
+    "uv": "0.11.20 (9252ba6b5 2026-06-10 aarch64-apple-darwin)",
+    "indeks": "https://pypi.org/simple"
+  },
+  "zakres": [
+    "Dwie osobne, nowe instalacje nieedytowalne z pyproject.toml: .[dev] oraz .[dev,fastapi]. Bez użycia uv.lock; to bieżące rozwiązanie PyPI, nie odtworzenie wersji CI z locka.",
+    "dev jako publikowany extra ma te same trzy wymagania co dependency-group dev używany w CI: pytest>=8.0, fastapi>=0.141.1, httpx2>=2.12.0. Nie wykonano osobnego uv sync --group dev.",
+    "Wariant bez routera oznacza bez jawnego extra fastapi. Nie oznacza braku FastAPI: dev sam je włącza. Literalny wariant dev bez pakietu FastAPI wymagałby zmiany deklaracji, której tu nie wykonano.",
+    "Legacy w tym raporcie oznacza stare pakiety HTTPX/HTTPCore oraz pozostający parser h11 w łańcuchu HTTPX2. Nie jest to ogólna klasyfikacja wieku lub bezpieczeństwa wszystkich pakietów.",
+    "Środowiska audytu są w ignorowanym .lokay/dev-dependency-audit, poza zarządzanym .venv. Bez seed i system-site-packages. Izolacja budowania jest domyślna; narzędzia budowania nie należą do spisu runtime."
+  ],
+  "polecenia": [
+    "date -u '+%Y-%m-%dT%H:%M:%SZ'; uv --version; uv python list --only-installed; git rev-parse HEAD",
+    "mkdir -p .lokay/dev-dependency-audit",
+    "uv venv --python 3.12.9 .lokay/dev-dependency-audit/dev",
+    "uv venv --python 3.12.9 .lokay/dev-dependency-audit/dev-router",
+    "uv --no-config pip install --python .lokay/dev-dependency-audit/dev/bin/python --index-url https://pypi.org/simple --no-cache '.[dev]' > .lokay/dev-dependency-audit/dev-install.log 2>&1",
+    "uv --no-config pip install --python .lokay/dev-dependency-audit/dev-router/bin/python --index-url https://pypi.org/simple --no-cache '.[dev,fastapi]' > .lokay/dev-dependency-audit/dev-router-install.log 2>&1",
+    "for variant in dev dev-router; do uv --no-config pip check --python .lokay/dev-dependency-audit/$variant/bin/python; uv --no-config pip tree --python .lokay/dev-dependency-audit/$variant/bin/python; done",
+    "for variant in dev dev-router; do .lokay/dev-dependency-audit/$variant/bin/python -c \"import sys, platform, importlib.metadata as m, datasource_kit, datasource_kit.adapters.fastapi, httpx2; print(sys.version, platform.platform(), sys.prefix, sys.base_prefix, datasource_kit.__file__); print([(d.metadata['Name'], d.version, d.requires) for d in m.distributions()])\"; done",
+    ".lokay/dev-dependency-audit/dev/bin/python -m pytest -q > .lokay/dev-dependency-audit/dev-pytest.log 2>&1",
+    ".lokay/dev-dependency-audit/dev-router/bin/python -m pytest -q > .lokay/dev-dependency-audit/dev-router-pytest.log 2>&1",
+    ".lokay/dev-dependency-audit/dev/bin/python -c \"import urllib.request,json; [print(n, p['info']['version'], p['info']['requires_dist']) for n in ('httpx2','httpcore2') for p in [json.load(urllib.request.urlopen('https://pypi.org/pypi/'+n+'/json'))]]\""
+  ],
+  "warianty": {
+    "dev_bez_jawnego_extra_routera": {
+      "wejście": ".[dev]",
+      "instalacja_exit": 0,
+      "pip_check": "21 pakietów, wszystkie zgodne, exit 0",
+      "pytest": "319 passed in 9.67s, exit 0",
+      "importy": "datasource_kit, datasource_kit.adapters.fastapi, httpx2: OK; datasource_kit z site-packages; sys.prefix != sys.base_prefix"
+    },
+    "dev_z_routerem": {
+      "wejście": ".[dev,fastapi]",
+      "instalacja_exit": 0,
+      "pip_check": "21 pakietów, wszystkie zgodne, exit 0",
+      "pytest": "319 passed in 9.75s, exit 0",
+      "importy": "datasource_kit, datasource_kit.adapters.fastapi, httpx2: OK; datasource_kit z site-packages; sys.prefix != sys.base_prefix"
+    }
+  },
+  "rozwiązane_wersje_w_obu_wariantach": [
+    "annotated-doc==0.0.5",
+    "annotated-types==0.8.0",
+    "anyio==4.15.1",
+    "datasource-kit==0.15.0",
+    "fastapi==0.159.1",
+    "h11==0.16.0",
+    "httpcore2==2.16.0",
+    "httpx2==2.16.0",
+    "idna==3.20",
+    "iniconfig==2.3.1",
+    "opentelemetry-api==1.45.1",
+    "packaging==26.3",
+    "pluggy==1.7.0",
+    "pydantic-core==2.50.1",
+    "pydantic==2.14.1",
+    "pygments==2.21.0",
+    "pytest==9.1.1",
+    "starlette==1.9.0",
+    "truststore==0.10.5",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4"
+  ],
+  "porównanie": "Osobny odczyt importlib.metadata w obu środowiskach: te same nazwy, wersje i Requires-Dist. Jawny dodatek fastapi nie dodaje żadnego pakietu.",
+  "aktywne_łańcuchy_HTTP_w_obu_wariantach": [
+    "datasource-kit[dev] → httpx2==2.16.0 → httpcore2==2.16.0 → h11==0.16.0",
+    "datasource-kit[dev] → httpx2==2.16.0 → truststore==0.10.5",
+    "datasource-kit[dev] → httpx2==2.16.0 → httpcore2==2.16.0 → truststore==0.10.5",
+    "datasource-kit[dev] → fastapi==0.159.1 → starlette==1.9.0 → anyio==4.15.1",
+    "Tylko drugi wariant ma dodatkową krawędź datasource-kit[fastapi] → fastapi==0.159.1."
+  ],
+  "metadane_aktywnych_krawędzi_legacy": {
+    "datasource-kit==0.15.0": ["httpx2>=2.12.0; extra == 'dev'"],
+    "httpx2==2.16.0": ["httpcore2==2.16.0; sys_platform != 'emscripten'"],
+    "httpcore2==2.16.0": ["h11>=0.16"],
+    "ocena_markerów": "extra=dev włącza HTTPX2. sys_platform=darwin spełnia != emscripten. h11 nie ma markera ani warunku extra: pozostaje aktywne niezależnie od opcjonalnych dodatków HTTPX2/HTTPCore2."
+  },
+  "tabela_legacy_rodzic_ograniczenie_działanie_potwierdzenie": [
+    {
+      "legacy": "h11==0.16.0 — aktywne w obu wariantach",
+      "rodzic_i_pełna_ścieżka": "datasource-kit[dev] → httpx2==2.16.0 → httpcore2==2.16.0 → h11==0.16.0",
+      "ograniczenie": "httpcore2: h11>=0.16; httpx2: httpcore2==2.16.0 na tej platformie; datasource-kit: httpx2>=2.12.0 dla dev",
+      "działanie": "Aktualizacja rodzica po spełnieniu bramki poniżej. Obecnie brak potwierdzonej wersji usuwającej h11. Nie usuwać h11 ręcznie ani wymaganej zależności httpx2: testy adaptera korzystają z HTTPX2. Usunięcie niewłączonych dodatków nie zmieni tej ścieżki.",
+      "niewiadoma": "Czy przyszła wersja HTTPX2/HTTPCore2 usunie h11? Bieżący PyPI wskazał 2.16.0 dla obu; te wersje zainstalowano i nadal wymagają h11. Nie ma podstaw, aby obiecywać usunięcie przez sam upgrade.",
+      "sposób_potwierdzenia": "Ponowić po publikacji stabilnego HTTPX2 >2.16.0 lub HTTPCore2 >2.16.0. Sprawdzić METADATA obu rodziców. Nie podnosić samego HTTPCore2 wbrew pinowi HTTPX2. W dwóch nowych środowiskach z kandydatem wymagane: brak h11 we wszystkich aktywnych ścieżkach i spisie dystrybucji, pip check exit 0, pełne pytest exit 0 oraz brak skipów testów adaptera. Dopiero wtedy wskazać konkretną zweryfikowaną wersję rodzica. Jeśli kandydat nadal wymaga h11, bramka pozostaje niespełniona."
+    },
+    {
+      "legacy": "httpx — niezainstalowane, wyłącznie niewłączone dodatki",
+      "rodzic_i_pełna_ścieżka": "Potencjalnie datasource-kit → fastapi[standard/standard-no-fastapi-cloud-cli/all] → httpx albo datasource-kit → fastapi → starlette[full] → httpx; żadna z tych aktywacji extra nie zachodzi.",
+      "ograniczenie": "fastapi==0.159.1: httpx<1.0.0,>=0.23.0 dla każdego z trzech dodatków; starlette==1.9.0: httpx<0.29.0,>=0.27.0; extra == 'full'",
+      "działanie": "Nie włączać zbędnych standard/all/full. Brak aktywnego pakietu do usunięcia. Jeśli te dodatki pojawią się w przyszłości bez potrzeby funkcjonalnej, usunąć dodatek zamiast wymuszać brak jego wymagania.",
+      "sposób_potwierdzenia": "Odczyt Requires-Dist i spisu importlib.metadata w obu instalacjach: httpx nieobecne. Extra dev projektu nie włącza extra dev/standard/full zależności."
+    },
+    {
+      "legacy": "httpcore — niezainstalowane",
+      "rodzic_i_pełna_ścieżka": "Brak aktywnej ścieżki; httpcore2 to odrębna dystrybucja, nie dowód obecności httpcore.",
+      "ograniczenie": "Brak wymagania httpcore w odczytanych metadanych zainstalowanych dystrybucji. Nie pobierano metadanych niezainstalowanego HTTPX, więc nie przypisuje się mu tu hipotetycznego pinu HTTPCore.",
+      "działanie": "Brak aktywnego pakietu do usunięcia; zachować brak zbędnych dodatków HTTPX.",
+      "sposób_potwierdzenia": "W obu środowiskach importlib.metadata nie zawiera httpcore; pip tree pokazuje wyłącznie httpcore2."
+    }
+  ],
+  "pozostałe_nieaktywne_metadane": [
+    "httpcore2: anyio<5.0,>=4.5.0 dla asyncio; h2<5,>=3 dla http2; socksio==1.* dla socks; trio<1.0,>=0.34.0 dla trio. Dodatki niewłączone. Obecność anyio pochodzi z innych aktywnych krawędzi, nie dowodzi włączenia asyncio.",
+    "httpx2: dodatki brotli/cli/http2/socks/ws/zstd niewłączone. httpx2-jsfetch ma marker emscripten, fałszywy na macOS.",
+    "pytest[dev] nie jest włączony przez datasource-kit[dev]. Jego metadane requests/setuptools nie instalują tych pakietów. requests, urllib3 i setuptools są nieobecne w obu środowiskach."
+  ],
+  "granice": "Raport dotyczy CPython 3.12.9 na macOS arm64 w podanej dacie. Nie badano innych platform, wersji Pythona, rdzenia ani lockowanego rozwiązania CI. Testy uruchomiono z checkoutu przez wskazane interpretery; osobne importy potwierdziły też instalację wheel w site-packages. Metadane i pip check nie stanowią audytu bezpieczeństwa lub autorstwa upstream. Nie zmieniono kodu, testów, deklaracji, locka ani dokumentacji projektu. Raport jest samodzielnym artefaktem pomiaru."
+}
