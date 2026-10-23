@@ -16,7 +16,6 @@ dependencies = []
 datasource-kit = "datasource_kit.cli:main"
 
 [project.optional-dependencies]
-# Blob/artifact resolution and in-process journal recording only.
 # Fala is GitHub-only (name = "fala"); the PEP 508 URL keeps pip off the
 # unrelated PyPI project of the same name. Adapter needs record_in_process
 # (Fala 0.7.28+).
