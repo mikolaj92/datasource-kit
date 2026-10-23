@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 import sys
 
 import pytest
@@ -37,3 +38,29 @@ def test_importing_core_and_adapters_when_fala_missing(
     # Then: import succeeds without touching fala.
     assert datasource_kit.__name__ == "datasource_kit"
     assert adapters.__name__ == "datasource_kit.adapters"
+
+
+def test_fala_adapter_does_not_export_artifact_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _block_fala_imports(monkeypatch)
+    from datasource_kit.adapters import fala
+
+    with pytest.raises(ImportError):
+        from datasource_kit.adapters.fala import FalaArtifactStore
+    assert "FalaArtifactStore" not in fala.__all__
+
+
+def test_artifact_store_round_trips_bytes_without_fala(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _block_fala_imports(monkeypatch)
+    from datasource_kit import ArtifactStore, InMemoryArtifactStore
+
+    store = InMemoryArtifactStore()
+    ref = store.store(b"payload")
+    resolved = store.resolve(ref)
+
+    assert isinstance(store, ArtifactStore)
+    assert ref == hashlib.sha256(b"payload").hexdigest()
+    assert resolved == b"payload"
