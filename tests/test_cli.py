@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
 
 from datasource_kit.cli import EXAMPLE_ROOT, main
 from datasource_kit.providers import builtin_registry
+from datasource_kit.report import IngestReport
 
-# ---------------------------------------------------------------------------
+
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -58,9 +59,7 @@ def demo_batch(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# ---------------------------------------------------------------------------
 # validate verb
-# ---------------------------------------------------------------------------
 
 
 def test_validate_demo_scraper_ok(demo_scraper: Path) -> None:
@@ -90,9 +89,7 @@ def test_validate_unknown_provider_nonzero(tmp_path: Path) -> None:
     assert main(["validate", str(tmp_path)]) != 0
 
 
-# ---------------------------------------------------------------------------
 # run verb
-# ---------------------------------------------------------------------------
 
 
 def test_run_writes_json(demo_scraper: Path, tmp_path: Path) -> None:
@@ -104,6 +101,17 @@ def test_run_writes_json(demo_scraper: Path, tmp_path: Path) -> None:
     assert data["source_name"] == "test-scraper"
     assert data["windows_processed"] > 0
     assert data["records_fetched"] > 0
+    expected = version("datasource-kit")
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert data["kit_version"] == expected == project["project"]["version"]
+    for report, expected_version in (
+        (IngestReport("test-scraper"), expected), (IngestReport.from_dict({}), expected),
+        (IngestReport("old", kit_version="0.14.0"), "0.14.0"),
+        (IngestReport.from_dict({"source_name": "old", "kit_version": "0.14.0"}), "0.14.0"),
+    ):
+        report.save_json(out)
+        assert json.loads(out.read_text())["kit_version"] == expected_version
+        assert IngestReport.load_json(out).as_dict() == report.as_dict()
 
 
 def test_run_stdout(demo_scraper: Path, capsys: pytest.CaptureFixture) -> None:
@@ -112,11 +120,6 @@ def test_run_stdout(demo_scraper: Path, capsys: pytest.CaptureFixture) -> None:
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert "source_name" in data
-
-
-# ---------------------------------------------------------------------------
-# coverage report verb
-# ---------------------------------------------------------------------------
 
 
 def test_coverage_report(demo_scraper: Path, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -129,11 +132,6 @@ def test_coverage_report(demo_scraper: Path, tmp_path: Path, capsys: pytest.Capt
     assert "records_fetched" in captured.out
 
 
-# ---------------------------------------------------------------------------
-# explain verb
-# ---------------------------------------------------------------------------
-
-
 def test_explain(demo_scraper: Path, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     out = tmp_path / "report.json"
     main(["run", str(demo_scraper), "--out", str(out)])
@@ -143,11 +141,6 @@ def test_explain(demo_scraper: Path, tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "source_name" in captured.out
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     assert f"kit_version:      {project['project']['version']}" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# examples run verb (shipped demo profiles)
-# ---------------------------------------------------------------------------
 
 
 def test_examples_run_demo_scraper() -> None:
@@ -183,11 +176,6 @@ def test_examples_run_demo_batch(tmp_path: Path) -> None:
 def test_examples_run_unknown_name_nonzero() -> None:
     rc = main(["examples", "run", "does-not-exist"])
     assert rc != 0
-
-
-# ---------------------------------------------------------------------------
-# Dep-free standalone assertion
-# ---------------------------------------------------------------------------
 
 
 def test_builtin_registry_stdlib_only() -> None:
