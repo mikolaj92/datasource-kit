@@ -404,8 +404,8 @@ recording policy are its own responsibility.
 
 This boundary intentionally does **not** create or finalize runs, mint IDs,
 retry, checkpoint, persist business data, clean results, or manage result
-lifetimes. The optional Fala execution and artifact adapters are separate; neither
-is imported by the dependency-free core.
+lifetimes. The optional Fala execution adapter is not imported by the
+dependency-free core.
 
 ## Install
 
@@ -418,7 +418,7 @@ Core has no third-party runtime dependencies. Optional integrations are lazy:
 
 ```bash
 pip install "datasource-kit[profiles]"   # YAML profile loading
-pip install "datasource-kit[fala]"       # Fala execution + artifact adapters
+pip install "datasource-kit[fala]"
 pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 ```
 
@@ -475,8 +475,8 @@ uv lock --check
 uv run --group dev pytest
 ```
 
-FastAPI adapter tests drive the router with `httpx2.AsyncClient` and
-`ASGITransport` only.
+The FastAPI adapter follows the consuming host's my-auth / my-usermanager pattern and imports FastAPI lazily inside the router factory.
+Importing the adapter never pulls in FastAPI. Adapter tests drive the router with `httpx2.AsyncClient` and `ASGITransport` only.
 
 
 ### Fail-closed process lifecycle
