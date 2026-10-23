@@ -475,8 +475,8 @@ uv lock --check
 uv run --group dev pytest
 ```
 
-FastAPI adapter tests drive the router with `httpx2.AsyncClient` and
-`ASGITransport` only.
+The FastAPI adapter follows the consuming host's my-auth / my-usermanager pattern and imports FastAPI lazily inside the router factory.
+Importing the adapter never pulls in FastAPI. Adapter tests drive the router with `httpx2.AsyncClient` and `ASGITransport` only.
 
 
 ### Fail-closed process lifecycle
