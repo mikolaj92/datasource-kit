@@ -110,5 +110,27 @@
     "httpx2: dodatki brotli/cli/http2/socks/ws/zstd niewłączone. httpx2-jsfetch ma marker emscripten, fałszywy na macOS.",
     "pytest[dev] nie jest włączony przez datasource-kit[dev]. Jego metadane requests/setuptools nie instalują tych pakietów. requests, urllib3 i setuptools są nieobecne w obu środowiskach."
   ],
+  "ponowna_weryfikacja_2026_10_23": {
+    "zakres": "Nowy pomiar .[dev,fastapi] na CPython 3.12.9, macOS arm64. Wcześniejsze sekcje pozostają historycznym pomiarem z 2026-10-22, nie wynikiem tego uruchomienia.",
+    "źródła": "pyproject.toml, uv.lock, .github/workflows/ci.yml oraz Requires-Dist z dystrybucji zainstalowanych nieedytowalnie z PyPI. Wszystkie źródła registry w locku wskazują https://pypi.org/simple. Nie włączono dodatku fala ani jego źródła GitHub.",
+    "polecenia": [
+      "uv venv --python 3.12 .lokay/transitive-audit/dev",
+      "uv --no-config pip install --python .lokay/transitive-audit/dev/bin/python --index-url https://pypi.org/simple --no-cache '.[dev,fastapi]'",
+      "uv --no-config pip check --python .lokay/transitive-audit/dev/bin/python",
+      "uv --no-config pip tree --python .lokay/transitive-audit/dev/bin/python",
+      ".lokay/transitive-audit/dev/bin/python -m pytest -q"
+    ],
+    "odczyt_metadanych": "importlib.metadata: version, requires dla datasource-kit, fastapi, starlette, httpx2, httpcore2, h11 oraz pełny spis distributions. tomllib: źródła, wersje i dependencies w uv.lock.",
+    "wyniki": "Instalacja exit 0; pip check: 21 zgodnych pakietów; pytest: 319 passed in 10.07s, exit 0, bez skipów. FastAPI 0.161.1, Starlette 1.9.0, HTTPX2 2.16.0, HTTPCore2 2.16.0, h11 0.16.0. HTTPX i HTTPCore nieobecne.",
+    "rodzic_legacy": "datasource-kit[dev] → httpx2==2.16.0 → httpcore2==2.16.0 → h11==0.16.0. Wymagania: httpx2>=2.12.0; httpcore2==2.16.0 przy sys_platform != emscripten; h11>=0.16 bez markera. Grupa dev deklaruje te same wymagania co extra dev. Bezpośrednim rodzicem h11 jest HTTPCore2, nie FastAPI.",
+    "nieaktywne_ścieżki": "FastAPI 0.161.1 nadal deklaruje httpx<1.0.0,>=0.23.0 dla standard, standard-no-fastapi-cloud-cli i all. Starlette 1.9.0 deklaruje httpx<0.29.0,>=0.27.0 dla full. Te dodatki nie są włączone. Obecność tych deklaracji nie oznacza instalacji HTTPX.",
+    "lock_a_bieżąca_instalacja": "uv.lock zachowuje FastAPI 0.141.1, Starlette 1.6.0 i ścieżkę datasource-kit dev → HTTPX2 2.12.0 → HTTPCore2 2.12.0 → h11 0.16.0. HTTPX i HTTPCore nie mają wpisów. Workflow uruchamia uv lock --check i uv run --group dev pytest -q na Pythonie 3.12/3.13. Bieżąca instalacja pip nie odtwarza tego locka; przejście do 2.16.0 również nie usuwa h11.",
+    "plan": [
+      "Pozostawić h11 jako wymaganą zależność HTTPCore2; nie usuwać go ręcznie ani nie wymuszać wersji HTTPCore2 niezgodnej z pinem HTTPX2. Test adaptera używa httpx2.AsyncClient i httpx2.ASGITransport.",
+      "Przy aktualizacji zależności wybrać stabilnego HTTPX2 nowszego niż 2.16.0 i sprawdzić METADATA jego oraz przypiętego HTTPCore2. Aktualizacja locka do już sprawdzonego 2.16.0 oznacza tylko aktualizację wersji, nie usunięcie legacy.",
+      "Usunięcie h11 uznać za gotowe dopiero po braku h11 we wszystkich aktywnych ścieżkach i spisie dystrybucji, zgodnym pip check oraz pełnym pytest bez skipów adaptera. Powtórzyć dla dev i dev,fastapi, także na Pythonie 3.12/3.13 z workflow. Jeśli rodzic nadal wymaga h11, pozostawić zależność i wskazać niespełnioną bramkę; obecnie brak potwierdzonej wersji usuwającej h11."
+    ],
+    "ograniczenia": "Nie wykonano ponownie osobnego wariantu dev, rdzenia, routera bez dev ani instalacji z locka. Nie sprawdzono macierzy Linux/Python 3.13, autorstwa upstream ani bezpieczeństwa kodu. Nie zmieniono kodu, testów, deklaracji, locka lub dokumentacji. Drzewo nie jest w pełni oczyszczone: h11 pozostaje."
+  },
   "granice": "Raport dotyczy CPython 3.12.9 na macOS arm64 w podanej dacie. Nie badano innych platform, wersji Pythona, rdzenia ani lockowanego rozwiązania CI. Testy uruchomiono z checkoutu przez wskazane interpretery; osobne importy potwierdziły też instalację wheel w site-packages. Metadane i pip check nie stanowią audytu bezpieczeństwa lub autorstwa upstream. Nie zmieniono kodu, testów, deklaracji, locka ani dokumentacji projektu. Raport jest samodzielnym artefaktem pomiaru."
 }
