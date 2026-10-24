@@ -422,10 +422,10 @@ pip install "datasource-kit[fala]"
 pip install "datasource-kit[fastapi]"    # FastAPI control-plane router
 ```
 
-The `[fala]` extra pins [mikolaj92/Fala](https://github.com/mikolaj92/Fala) to `v0.7.28`
-for `record_in_process`, not artifact storage. This pin is not a proven compatibility floor;
-compatibility with 0.8.x remains unverified. Fala is not published to PyPI;
-the PEP 508 git URL prevents `pip` from resolving the unrelated PyPI project named `fala`.
+The `[fala]` extra installs [mikolaj92/Fala](https://github.com/mikolaj92/Fala)
+from GitHub at the `v0.7.28` tag (`record_in_process`). Fala is not published
+to PyPI; the extra carries a PEP 508 git URL so `pip` does not resolve the
+unrelated PyPI project named `fala`.
 
 ## Minimal Batch Usage
 
