@@ -1,0 +1,177 @@
+{
+  "tytuł": "Pochodzenie zależności: rdzeń i opcjonalny router FastAPI",
+  "data_UTC": "2026-10-22",
+  "repozytorium_HEAD": "832b8ec7a027ea3ea6c976183a7f173f14f71eef",
+  "środowisko": {
+    "python": "3.12.9 (main, Feb 12 2025, 15:09:19) [Clang 19.1.6 ]",
+    "platforma": "macOS-27.0.1-arm64-arm-64bit",
+    "uv": "0.11.20 (9252ba6b5)",
+    "indeks": "https://pypi.org/simple"
+  },
+  "metoda": [
+    "Dwa nowe venv bez system-site-packages i bez seed. Instalacja nieedytowalna z pyproject.toml; uv pip nie używa uv.lock ani domyślnych grup dev.",
+    "Jawny indeks PyPI, --no-config i --no-cache. Izolacja budowania pozostawiona domyślna; zależności budowania nie są częścią poniższego drzewa runtime.",
+    "W tym checkout uv.lock jest śledzony przez Git (git ls-files uv.lock); git check-ignore -v uv.lock nie wskazał reguły. Nie użyto go jako gwarancji odtwarzalności."
+  ],
+  "polecenia": [
+    "date -u; uv --version; uv python list --only-installed; git rev-parse HEAD; git ls-files uv.lock; git check-ignore -v uv.lock",
+    "mkdir -p .venv/provenance",
+    "uv venv --python 3.12.9 .venv/provenance/core",
+    "uv venv --python 3.12.9 .venv/provenance/router",
+    "uv --no-config pip install --python .venv/provenance/core/bin/python --index-url https://pypi.org/simple --no-cache .",
+    "uv --no-config pip install --python .venv/provenance/router/bin/python --index-url https://pypi.org/simple --no-cache '.[fastapi]'",
+    "uv --no-config pip check --python .venv/provenance/core/bin/python",
+    "uv --no-config pip check --python .venv/provenance/router/bin/python",
+    "uv --no-config pip tree --python .venv/provenance/core/bin/python",
+    "uv --no-config pip tree --python .venv/provenance/router/bin/python",
+    ".venv/provenance/core/bin/python -c \"import sys, importlib.metadata as m, datasource_kit; print(sys.version, sys.prefix, sys.base_prefix, datasource_kit.__file__); print([(d.metadata['Name'], d.version, d.requires) for d in m.distributions()])\"",
+    ".venv/provenance/router/bin/python -c \"import sys, importlib.metadata as m, datasource_kit.adapters.fastapi; print(sys.version, sys.prefix, sys.base_prefix); print([(d.metadata['Name'], d.version, d.requires, d.metadata.get_all('Provides-Extra')) for d in m.distributions()])\""
+  ],
+  "rdzeń": {
+    "instalacja_exit": 0,
+    "zainstalowane": [
+      "datasource-kit==0.15.0"
+    ],
+    "aktywne_krawędzie": [],
+    "kontrole": "pip check: 1 pakiet, zgodny; import datasource_kit z site-packages: OK; sys.prefix != sys.base_prefix."
+  },
+  "router": {
+    "instalacja_exit": 0,
+    "zainstalowane": [
+      "annotated-doc==0.0.5",
+      "annotated-types==0.8.0",
+      "anyio==4.15.1",
+      "datasource-kit==0.15.0",
+      "fastapi==0.159.1",
+      "idna==3.20",
+      "opentelemetry-api==1.45.1",
+      "pydantic-core==2.50.1",
+      "pydantic==2.14.1",
+      "starlette==1.9.0",
+      "typing-extensions==4.16.0",
+      "typing-inspection==0.4.4"
+    ],
+    "aktywne_krawędzie": [
+      "datasource-kit[fastapi] → fastapi",
+      "fastapi → starlette, pydantic, typing-extensions, typing-inspection, annotated-doc, opentelemetry-api",
+      "starlette → anyio, typing-extensions (python_version < 3.13: prawda)",
+      "anyio → idna, typing-extensions (python_version < 3.15: prawda)",
+      "pydantic → annotated-types, pydantic-core, typing-extensions, typing-inspection",
+      "pydantic-core → typing-extensions",
+      "typing-inspection → typing-extensions",
+      "opentelemetry-api → typing-extensions"
+    ],
+    "kontrole": "pip check: 12 pakietów, zgodne; import datasource_kit.adapters.fastapi: OK; sys.prefix != sys.base_prefix. HTTPX2, HTTPCore2, HTTPX, HTTPCore i pytest nie są zainstalowane."
+  },
+  "metadane_i_markery": {
+    "datasource-kit": {
+      "Provides-Extra": [
+        "dev",
+        "fala",
+        "fastapi",
+        "profiles"
+      ],
+      "istotne_Requires-Dist": [
+        "fastapi>=0.141.1; extra == 'dev'",
+        "httpx2>=2.12.0; extra == 'dev'",
+        "fastapi>=0.141.1; extra == 'fastapi'"
+      ]
+    },
+    "fastapi": {
+      "wersja": "0.159.1",
+      "Provides-Extra": [
+        "opentelemetry",
+        "standard",
+        "standard-no-fastapi-cloud-cli",
+        "all"
+      ],
+      "aktywne_Requires-Dist": [
+        "starlette>=0.46.0",
+        "pydantic>=2.9.0",
+        "typing-extensions>=4.8.0",
+        "typing-inspection>=0.4.2",
+        "annotated-doc>=0.0.2",
+        "opentelemetry-api>=1.44.0"
+      ],
+      "HTTPX2_Requires-Dist": [
+        "httpx2>=2.0.0; extra == \"standard\"",
+        "httpx2>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "httpx2>=2.0.0; extra == \"all\""
+      ]
+    },
+    "starlette": {
+      "wersja": "1.9.0",
+      "Provides-Extra": [
+        "full"
+      ],
+      "istotne_Requires-Dist": [
+        "anyio<5,>=4.0.0",
+        "typing-extensions>=4.10.0; python_version < '3.13'",
+        "httpx2>=2.0.0; extra == 'full'"
+      ]
+    },
+    "interpretacja": "Dodatek datasource-kit[fastapi] włącza zwykłe fastapi, nie fastapi[standard/all]. Starlette nie ma włączonego full. Deklaracje HTTPX2 w dev, standard, standard-no-fastapi-cloud-cli, all i full pozostają nieaktywne. Markery extra nie propagują się automatycznie pomiędzy pakietami."
+  },
+  "metadane_niezainstalowanych": {
+    "metoda": "GET https://pypi.org/pypi/{name}/json przez urllib.request, wybór urls[].filename kończącego się py3-none-any.whl, GET urls[].url, hashlib.sha256 porównany z digests.sha256, zipfile + email.parser.BytesParser odczyt .dist-info/METADATA. Bez instalacji i bez rozwiązywania wariantu dev.",
+    "dystrybucje": [
+      {
+        "name": "httpx2",
+        "version": "2.16.0",
+        "requires_python": ">=3.11",
+        "provides_extra": [
+          "brotli",
+          "cli",
+          "http2",
+          "socks",
+          "ws",
+          "zstd"
+        ],
+        "requires_dist": [
+          "anyio>=4.10; sys_platform != 'emscripten'",
+          "httpcore2==2.16.0; sys_platform != 'emscripten'",
+          "httpx2-jsfetch; sys_platform == 'emscripten' and python_version >= '3.12'",
+          "idna>=3.18",
+          "truststore>=0.10; sys_platform != 'emscripten'",
+          "typing-extensions>=4.5.0; python_version < '3.13'",
+          "brotli>=1.2.0; (platform_python_implementation == 'CPython') and extra == 'brotli'",
+          "brotlicffi>=1.2.0.2; (platform_python_implementation != 'CPython') and extra == 'brotli'",
+          "click>=8.4.2; extra == 'cli'",
+          "pygments==2.*; extra == 'cli'",
+          "rich<16,>=10; extra == 'cli'",
+          "h2<5,>=3; extra == 'http2'",
+          "socksio==1.*; extra == 'socks'",
+          "wsproto>=1.2; extra == 'ws'",
+          "backports-zstd>=1.0.0; (python_version <= '3.13') and extra == 'zstd'"
+        ],
+        "wheel_url": "https://files.pythonhosted.org/packages/7b/3d/2e4bc4fd1ef9770871669adb348d612a6e4786b303a23f9935b81c48dd60/httpx2-2.16.0-py3-none-any.whl",
+        "sha256": "fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a",
+        "installed": false
+      },
+      {
+        "name": "httpcore2",
+        "version": "2.16.0",
+        "requires_python": ">=3.11",
+        "provides_extra": [
+          "asyncio",
+          "http2",
+          "socks",
+          "trio"
+        ],
+        "requires_dist": [
+          "h11>=0.16",
+          "truststore>=0.10",
+          "anyio<5.0,>=4.5.0; extra == 'asyncio'",
+          "h2<5,>=3; extra == 'http2'",
+          "socksio==1.*; extra == 'socks'",
+          "trio<1.0,>=0.34.0; extra == 'trio'"
+        ],
+        "wheel_url": "https://files.pythonhosted.org/packages/af/c2/ce417c397afa5181f0e3c6ff01a4d01639414e1adef08730d97571297151/httpcore2-2.16.0-py3-none-any.whl",
+        "sha256": "5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f",
+        "installed": false
+      }
+    ],
+    "wniosek": "HTTPX2 2.16.0 deklaruje HTTPCore2==2.16.0 na sys_platform != emscripten (prawda na tym macOS). Jest to tylko potencjalna ścieżka, nie aktywna zależność obu instalacji. Wersje 2.16.0 pochodzą z bieżącego PyPI, nie z rozwiązania wariantów rdzeń/router."
+  },
+  "granice": "Wynik dotyczy tej daty, CPython 3.12.9 i macOS arm64. Brak pinów oznacza, że późniejsza instalacja może rozwiązać inne wersje. Nie badano dev, innych dodatków ani pełnej macierzy platform. Nie zmieniono deklaracji ani locka; brak twierdzenia o pełnym wyczyszczeniu drzewa lub audycie bezpieczeństwa. Sprawdzono metadane dystrybucji i zgodność wymagań, nie autorstwo lub integralność kodu upstream."
+}
